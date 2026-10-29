@@ -76,7 +76,7 @@ All security gates are blocking in CI.
 | Secrets | gitleaks |
 | Container | Trivy, hadolint; distroless nonroot runtime image |
 | DAST | ZAP (API and baseline), Nuclei, testssl.sh, ssh-audit |
-| Supply chain | OpenSSF Scorecard, actions pinned by SHA, cosign, SBOM via goreleaser |
+| Supply chain | OpenSSF Scorecard, actions pinned by SHA; releases only from main after every gate passes; static-PIE binaries and a multi-arch image, both signed with cosign, with SBOMs and GitHub build provenance |
 
 ## Development
 
@@ -93,6 +93,7 @@ Everything runs in a container; no host Go toolchain is required.
 | `task fuzz`, `task mutation` | Fuzzing (`FUZZTIME=5m`) and mutation testing |
 | `task integration` | Real git/git-lfs against the server with a local S3 (`docker compose up -d s3`) |
 | `task image`, `task scan`, `task dast` | Build the runtime image, scan it, run DAST |
+| `task build`, `task release-check` | Release binaries for this platform, or validate the release config and build every target, in `dist/` |
 
 Configuration is by environment variable. Secrets are never put in the environment, only the paths of the files that hold them:
 

@@ -1,0 +1,49 @@
+version: 2
+
+# Runs in the dev image (see .github/workflows/release.yml and `task build`),
+# which carries the cross C toolchain for the other architecture.
+
+before:
+  hooks:
+    - go mod verify
+
+# The build recipe matches the Dockerfile's build stage; change both together.
+# CGO is on only so the external linker can emit a static-PIE (ASLR) binary;
+# netgo and osusergo keep glibc out of the code.
+builds:
+  - id: naraen
+    main: ./cmd/naraen
+    binary: naraen
+    env: [CGO_ENABLED=1]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath, -buildmode=pie]
+    tags: [netgo, osusergo]
+    ldflags: ["-s -w -linkmode=external -extldflags=-static-pie -X main.version={{.Version}}"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    overrides:
+      - {goos: linux, goarch: amd64, goamd64: v1, env: [CC=x86_64-linux-gnu-gcc]}
+      - {goos: linux, goarch: arm64, goarm64: v8.0, env: [CC=aarch64-linux-gnu-gcc]}
+
+archives:
+  - formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    output: true
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    signature: ${artifact}.sigstore.json
+
+changelog:
+  use: github

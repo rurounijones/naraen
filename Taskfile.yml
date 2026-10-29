@@ -95,11 +95,14 @@ tasks:
       - gitleaks git --config .gitleaks.toml --redact --no-banner .
 
   build:
-    desc: Static, stripped binaries (not PIE; the runtime image build is static-PIE)
-    env:
-      CGO_ENABLED: "0"
+    desc: Static-PIE, stripped binaries for this platform in dist/, built by the release recipe
+    cmds: [goreleaser build --snapshot --clean --single-target]
+
+  release-check:
+    desc: Validate the release config and build every release target
     cmds:
-      - go build -trimpath -ldflags "-s -w" -o bin/naraen ./cmd/naraen
+      - goreleaser check
+      - goreleaser build --snapshot --clean
 
   run:
     desc: Run the server locally (dev only)
@@ -133,6 +136,7 @@ tasks:
       - task: vuln
       - task: sec
       - task: secrets
+      - task: release-check
 
   ci:
     desc: Everything, including slow gates

@@ -6,4 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+The first release has not been cut yet, so everything so far is listed as added.
+
+### Added
+
+- Fail-closed authorization from an in-memory snapshot. Requests are refused until there is a snapshot and once the snapshot is older than its maximum age.
+- Validation before each snapshot swap, which rejects a sync that changes identities or grants by an unusually large amount.
+
 [Unreleased]: https://github.com/rurounijones/naraen/commits/main

@@ -1,0 +1,10 @@
+title = "naraen"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures"
+paths = [
+  '''(^|/)testdata/''',
+]

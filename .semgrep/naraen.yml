@@ -1,0 +1,35 @@
+rules:
+  - id: naraen-nonconstant-secret-compare
+    languages: [go]
+    severity: ERROR
+    message: Compare secrets, tokens and MACs with hmac.Equal or subtle.ConstantTimeCompare, never == or bytes.Equal.
+    patterns:
+      - pattern-either:
+          - pattern: $A == $B
+          - pattern: $A != $B
+          - pattern: bytes.Equal($A, $B)
+      - pattern-not: len(...) == $B
+      - pattern-not: len(...) != $B
+      - pattern-not: $A == nil
+      - pattern-not: $A != nil
+      - metavariable-regex:
+          metavariable: $A
+          regex: '(?i).*(token|secret|mac|signature|sig|hmac|digest).*'
+  - id: naraen-log-presigned-url
+    languages: [go]
+    severity: ERROR
+    message: Pre-signed URLs and bearer tokens are credentials and must never be logged.
+    # $LOG matches both the slog package and a *slog.Logger value, so the
+    # package functions and the Logger methods the code actually calls are
+    # covered. Any argument counts, so a credential is caught as a key or
+    # as a value.
+    patterns:
+      - pattern: $LOG.$LEVEL(..., $ARG, ...)
+      - metavariable-regex:
+          metavariable: $LEVEL
+          regex: '^((Debug|Info|Warn|Error)(Context)?|Log|LogAttrs)$'
+      - metavariable-regex:
+          metavariable: $ARG
+          regex: '(?i).*(presign|href|url|token|authorization).*'
+    paths:
+      exclude: ["*_test.go"]

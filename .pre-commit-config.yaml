@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+        entry: gitleaks git --pre-commit --redact --staged --config .gitleaks.toml --no-banner
+        language: system
+        pass_filenames: false
+      - id: fmt
+        name: gofumpt/goimports
+        entry: scripts/tool.sh golangci-lint fmt --diff
+        language: system
+        types: [go]
+        pass_filenames: false
+      - id: lint
+        name: golangci-lint
+        entry: scripts/tool.sh golangci-lint run
+        language: system
+        types: [go]
+        pass_filenames: false
+      - id: hadolint
+        name: hadolint
+        entry: hadolint
+        language: system
+        files: Dockerfile
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/

@@ -1,0 +1,17 @@
+unleash:
+  workers: 0
+  timeout-coefficient: 10
+  threshold:
+    # Efficacy is killed / (killed + lived). gremlins fails when the score is
+    # <= the threshold, so 100 could never pass. 99.99 is the strictest
+    # usable value: any lived mutant (under 10,000 mutants) drops the score
+    # below it. A timed-out mutant counts as detected.
+    #
+    # There is deliberately no mutant-coverage threshold. task cover already
+    # requires 100% line coverage, so every mutant in a function body is
+    # covered. The only mutants it could flag are in package-level const and
+    # var initializers, which Go's coverage profile never instruments, so
+    # they would be reported as uncovered however well they are tested.
+    efficacy: 99.99
+  exclude-files:
+    - "_test\\.go$"

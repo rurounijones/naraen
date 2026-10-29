@@ -1,0 +1,145 @@
+version: "3"
+
+# Run inside the devcontainer (or `docker compose run --rm dev task <name>`).
+# Go-based quality tools are pinned in tools/go.mod, a module of their own,
+# and run with scripts/tool.sh.
+
+vars:
+  FUZZTIME: '{{.FUZZTIME | default "20s"}}'
+  IMAGE: naraen:dev
+
+tasks:
+  default:
+    cmds: [task --list]
+    silent: true
+
+  fmt:
+    desc: Format code
+    cmds: [scripts/tool.sh golangci-lint fmt]
+
+  fmt-check:
+    desc: Fail if code is not formatted
+    cmds: [scripts/tool.sh golangci-lint fmt --diff]
+
+  tidy-check:
+    desc: Fail if the server or tools module is not tidy or does not verify
+    cmds:
+      - go mod tidy -diff
+      - go mod verify
+      - go -C tools mod tidy -diff
+      - go -C tools mod verify
+
+  lint:
+    desc: Go, Dockerfile and workflow linters
+    cmds:
+      - scripts/tool.sh golangci-lint run
+      - task: docker-lint
+      - task: actions-lint
+
+  nilaway:
+    desc: Nil-safety analysis
+    cmds: ['scripts/tool.sh nilaway -include-pkgs="github.com/rurounijones/naraen" ./...']
+
+  docker-lint:
+    desc: Lint the Dockerfile
+    cmds: [hadolint Dockerfile]
+
+  actions-lint:
+    desc: Lint GitHub Actions workflows
+    cmds: [actionlint]
+
+  test:
+    desc: Unit tests with the race detector
+    cmds: [go test -race -shuffle=on ./...]
+
+  cover:
+    desc: Tests with line (100%) and branch (100%) coverage gates
+    cmds:
+      - go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ./...
+      - scripts/tool.sh go-test-coverage --config=.testcoverage.yml
+      - scripts/branchcov.sh
+
+  mutation:
+    desc: Mutation testing (config in .gremlins.yaml)
+    cmds: [scripts/tool.sh gremlins unleash]
+
+  fuzz:
+    desc: Run every fuzz target for FUZZTIME (default 20s)
+    cmds:
+      - FUZZTIME={{.FUZZTIME}} scripts/fuzz.sh
+
+  integration:
+    desc: Real git + git-lfs against the server with a local S3
+    cmds: [go test -tags integration -count=1 ./test/integration/...]
+
+  bench:
+    desc: Benchmarks
+    cmds: [go test -run='^$' -bench=. -benchmem ./...]
+
+  vuln:
+    desc: Known-vulnerability checks on source and dependencies
+    cmds:
+      - scripts/tool.sh govulncheck ./...
+      - go mod verify
+
+  sec:
+    desc: Static security analysis
+    cmds:
+      - scripts/tool.sh gosec -exclude-generated ./...
+      - semgrep scan --error --metrics=off --config .semgrep --config p/golang --config p/jwt --config p/secrets --config p/security-audit .
+
+  secrets:
+    desc: Secret scanning of the working tree and history
+    cmds:
+      - gitleaks dir --config .gitleaks.toml --redact --no-banner .
+      - gitleaks git --config .gitleaks.toml --redact --no-banner .
+
+  build:
+    desc: Static, stripped binaries (not PIE; the runtime image build is static-PIE)
+    env:
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -trimpath -ldflags "-s -w" -o bin/naraen ./cmd/naraen
+
+  run:
+    desc: Run the server locally (dev only)
+    cmds: [go run ./cmd/naraen]
+
+  image:
+    desc: Build the hardened runtime image
+    cmds:
+      - docker build --target runtime -t {{.IMAGE}} .
+
+  scan:
+    desc: Trivy filesystem, config and image scans (HIGH/CRITICAL fail)
+    deps: [image]
+    cmds:
+      - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore .
+      - trivy config --severity HIGH,CRITICAL --exit-code 1 .
+      - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore {{.IMAGE}}
+
+  dast:
+    desc: ZAP, Nuclei, testssl.sh and ssh-audit against the compose-run server
+    cmds: [scripts/dast.sh]
+
+  check:
+    desc: Fast local gate
+    cmds:
+      - task: fmt-check
+      - task: tidy-check
+      - task: lint
+      - task: nilaway
+      - task: cover
+      - task: vuln
+      - task: sec
+      - task: secrets
+
+  ci:
+    desc: Everything, including slow gates
+    cmds:
+      - task: check
+      - task: fuzz
+      - task: mutation
+      - task: integration
+      - task: scan
+      - task: dast

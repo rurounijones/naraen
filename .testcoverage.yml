@@ -1,0 +1,13 @@
+profile: coverage.out
+local-prefix: github.com/rurounijones/naraen
+
+# Line coverage must be 100% everywhere. Branch coverage (scripts/branchcov.sh)
+# is held to the same bar, and every mutant must be killed (.gremlins.yaml).
+threshold:
+  file: 100
+  package: 100
+  total: 100
+
+exclude:
+  paths:
+    - /testdata/

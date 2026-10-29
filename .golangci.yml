@@ -1,0 +1,110 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags: [integration]
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gosec
+    - errorlint
+    - bodyclose
+    - noctx
+    - sloglint
+    - gocritic
+    - revive
+    - depguard
+    - forbidigo
+    - nolintlint
+    - misspell
+    - unconvert
+    - wastedassign
+    - copyloopvar
+  settings:
+    govet:
+      enable-all: true
+      disable: [fieldalignment, shadow]
+    gosec:
+      excludes: []
+    sloglint:
+      no-mixed-args: true
+      kv-only: true
+      context: scope
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    depguard:
+      rules:
+        # The request path must never learn where authorization data came from.
+        # httpapi will serve the Batch API, so a provider's webhook handler is
+        # mounted on it from main as a plain http.Handler, never imported.
+        request-path-isolation:
+          list-mode: lax
+          files:
+            - "**/internal/authz/**"
+            - "**/internal/sshd/**"
+            - "**/internal/batch/**"
+            - "**/internal/token/**"
+            - "**/internal/httpapi/**"
+            - "**/internal/oidc/**"
+            - "**/internal/datastore/**"
+          deny:
+            - pkg: github.com/rurounijones/naraen/internal/provider
+              desc: request-path packages read only the datastore snapshot, never a provider
+        weak-crypto:
+          list-mode: lax
+          files: ["$all"]
+          deny:
+            - pkg: math/rand
+              desc: use crypto/rand
+            - pkg: math/rand/v2
+              desc: use crypto/rand
+            - pkg: crypto/md5
+              desc: weak hash
+            - pkg: crypto/sha1
+              desc: weak hash
+            - pkg: crypto/des
+              desc: weak cipher
+            - pkg: crypto/rc4
+              desc: weak cipher
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: use log/slog
+        - pattern: ^http\.(Get|Post|Head|PostForm)$
+          msg: use a client with timeouts and a context
+        - pattern: ^tls\.Config$
+          msg: construct TLS config only in internal/httpapi
+    revive:
+      rules:
+        - name: exported
+        - name: error-return
+        - name: error-naming
+        - name: unused-parameter
+        - name: context-as-argument
+  exclusions:
+    presets: [comments, std-error-handling]
+    rules:
+      - path: _test\.go
+        linters: [gosec, forbidigo, noctx]
+      - path: internal/httpapi/
+        linters: [forbidigo]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes: [github.com/rurounijones/naraen]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

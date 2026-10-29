@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.png binary
+*.golden.json linguist-generated
+go.sum linguist-generated

@@ -1,0 +1,10 @@
+.git
+.github
+.devcontainer
+bin
+dist
+dast-reports
+coverage.out
+*.md
+!README.md
+tmp

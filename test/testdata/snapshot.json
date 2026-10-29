@@ -1,0 +1,14 @@
+{
+  "meta": {"provider": "file", "version": "dev", "synced_at": "2026-01-01T00:00:00Z"},
+  "identities": [
+    {"id": "alice", "kind": "person", "name": "Alice", "active": true}
+  ],
+  "keys": [],
+  "repos": [
+    {"id": "1", "path": "example/repo"}
+  ],
+  "grants": [
+    {"identity_id": "alice", "repo_id": "1", "level": "write"}
+  ],
+  "trusts": []
+}

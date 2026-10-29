@@ -1,0 +1,36 @@
+name: security
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_call:
+  schedule: [{cron: "17 4 * * *"}]
+permissions: {contents: read}
+jobs:
+  codeql:
+    runs-on: ubuntu-24.04
+    permissions: {contents: read, security-events: write}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with: {languages: go, queries: security-extended}
+      - uses: github/codeql-action/autobuild@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Build dev image
+        run: docker build --target dev -t naraen-dev .
+      - name: Run
+        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task scan"
+  osv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      # The image and arguments live in docker-compose.yml, where Dependabot
+      # keeps the digest pin current.
+      - name: OSV-Scanner
+        run: docker compose --profile scan run --rm osv-scanner

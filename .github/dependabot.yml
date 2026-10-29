@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule: {interval: daily}
+  # Development tools, kept out of the server's module graph.
+  - package-ecosystem: gomod
+    directory: /tools
+    schedule: {interval: weekly}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: devcontainers
+    directory: /
+    schedule: {interval: weekly}

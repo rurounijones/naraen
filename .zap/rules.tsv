@@ -1,0 +1,10 @@
+# ZAP rule config: id<TAB>action (FAIL|WARN|IGNORE)<TAB>comment
+# Everything not listed defaults to WARN; the -I flag is not used, so warnings fail only if listed FAIL.
+10020	FAIL	Anti-clickjacking header
+10021	FAIL	X-Content-Type-Options
+10038	FAIL	Content-Security-Policy header not set
+10036	FAIL	Server version disclosure
+10054	FAIL	Cookie without SameSite
+90022	FAIL	Application error disclosure
+10049	IGNORE	Non-storable content: every response is deliberately Cache-Control: no-store
+90004	FAIL	Cross-Origin-Resource-Policy header

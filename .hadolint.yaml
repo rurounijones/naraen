@@ -1,0 +1,7 @@
+failure-threshold: info
+ignored:
+  - DL3008 # apt packages track the digest-pinned base image
+trustedRegistries:
+  - docker.io
+  - gcr.io
+  - ghcr.io

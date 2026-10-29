@@ -1,0 +1,47 @@
+{
+  "name": "naraen",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "dev"
+  },
+  "runArgs": ["--security-opt=seccomp=unconfined"],
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/naraen",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/naraen,type=bind",
+  "mounts": [
+    "source=naraen-gomod,target=/go/pkg,type=volume",
+    "source=naraen-gocache,target=/home/vscode/.cache,type=volume"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "forwardPorts": [2222, 8443, 8333],
+  "portsAttributes": {
+    "2222": { "label": "SSH (LFS authenticate)" },
+    "8443": { "label": "HTTPS (Batch API)" },
+    "8333": { "label": "S3 (SeaweedFS)" }
+  },
+  "containerEnv": {
+    "GOFLAGS": "-mod=readonly"
+  },
+  "postCreateCommand": "sudo chown -R vscode: /go/pkg /home/vscode/.cache && go mod download && go -C tools mod download && pre-commit install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "redhat.vscode-yaml",
+        "ms-azuretools.vscode-docker",
+        "editorconfig.editorconfig",
+        "task.vscode-task"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": false,
+        "go.lintTool": "golangci-lint-v2",
+        "go.lintOnSave": "package",
+        "editor.formatOnSave": true,
+        "gopls": { "formatting.gofumpt": true }
+      }
+    }
+  }
+}

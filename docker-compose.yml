@@ -1,0 +1,92 @@
+# Local stack for the devcontainer, integration tests and DAST.
+# Images are pinned by digest; Dependabot keeps them current.
+name: naraen
+
+services:
+  # Local S3. MinIO would be the natural choice, but it no longer publishes anonymously
+  # pullable images, so SeaweedFS stands in. Swap S3_IMAGE to change it.
+  s3:
+    image: ${S3_IMAGE:-chrislusf/seaweedfs:latest@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
+    command: ["server", "-s3", "-dir=/data"]
+    ports: ["127.0.0.1:8333:8333"]
+    volumes: ["s3-data:/data"]
+
+  naraen:
+    build:
+      context: .
+      target: runtime
+    environment:
+      # Development mode: key material that is not configured is ephemeral,
+      # so none is written down anywhere.
+      NARAEN_DEV: "true"
+      NARAEN_SNAPSHOT_FILE: /etc/naraen/snapshot.json
+      NARAEN_SNAPSHOT_MAX_AGE: 87600h  # the static snapshot is loaded once and never re-synced
+    volumes:
+      - ./test/testdata/snapshot.json:/etc/naraen/snapshot.json:ro
+    ports:
+      - "127.0.0.1:2222:2222"
+      - "127.0.0.1:8443:8443"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # distroless has no shell or curl; the binary is not an HTTP client, so
+      # readiness is checked from outside by compose --wait via the TCP port.
+      test: ["NONE"]
+
+  # ---- DAST tools (profile "dast") ----
+  zap-api:
+    profiles: [dast]
+    image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
+    command: >
+      zap-api-scan.py -t /zap/wrk/api/openapi.yaml -f openapi
+      -O https://naraen:8443 -c /zap/wrk/.zap/rules.tsv -r dast-reports/zap-api.html -I
+    volumes: [".:/zap/wrk:rw"]
+    depends_on: [naraen]
+
+  zap-baseline:
+    profiles: [dast]
+    image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
+    command: >
+      zap-baseline.py -t https://naraen:8443 -c /zap/wrk/.zap/rules.tsv
+      -r dast-reports/zap-baseline.html
+    volumes: [".:/zap/wrk:rw"]
+    depends_on: [naraen]
+
+  testssl:
+    profiles: [dast]
+    image: drwetter/testssl.sh:latest@sha256:9fc0395106bf1df9a20695d04d6fda09c56301cd62a63cb24aedaa27f991a1e4
+    # Findings are written as JSON and judged by scripts/dast.sh, because
+    # testssl.sh itself exits 0 whatever it finds.
+    command: ["--severity", "LOW", "-p", "-E", "-U", "-h", "-S", "--quiet", "--color", "0", "--jsonfile", "/out/testssl.json", "naraen:8443"]
+    volumes: ["./dast-reports:/out:rw"]
+    depends_on: [naraen]
+
+  nuclei:
+    profiles: [dast]
+    image: projectdiscovery/nuclei:latest@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb
+    command: ["-u", "https://naraen:8443", "-severity", "low,medium,high,critical", "-tags", "tls,misconfig,exposure,cve", "-silent", "-nc", "-fr", "-eid", "self-signed-ssl"]
+    depends_on: [naraen]
+
+  ssh-audit:
+    profiles: [dast]
+    image: positronsecurity/ssh-audit:latest@sha256:6d5dee75fe91b5f6279f683f0e7d4374d2ba83e2227c8d9a17097aac2775127d
+    # Policy mode: fails unless the server offers exactly the audited algorithm set.
+    command: ["-P", "/policy/naraen.policy", "naraen:2222"]
+    volumes: ["./.ssh-audit:/policy:ro"]
+    depends_on: [naraen]
+
+  # ---- Dependency scan (profile "scan"), run by the security workflow ----
+  # Kept here rather than in the workflow so Dependabot updates its pin.
+  # Call analysis is off because the image's Go toolchain can lag go.mod;
+  # reachability is govulncheck's job in task vuln. Exceptions live in
+  # osv-scanner.toml.
+  osv-scanner:
+    profiles: [scan]
+    image: ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0
+    command: ["scan", "--recursive", "--no-call-analysis=go", "--lockfile=go.mod:/src/go.mod"]
+    working_dir: /src
+    volumes: [".:/src:ro"]
+
+volumes:
+  s3-data:

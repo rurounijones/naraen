@@ -1,0 +1,7 @@
+# OSV-Scanner exceptions. Each entry needs a reason and a review date, after
+# which the scan fails again until the entry is re-justified or removed.
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-04-29
+reason = "Package-level advisory for golang.org/x/crypto/openpgp, which has no fix. naraen does not import openpgp (not in go list -deps), and govulncheck reports it unreachable."

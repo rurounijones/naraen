@@ -1,0 +1,72 @@
+openapi: 3.0.3
+info:
+  title: naraen
+  version: 0.1.0
+  description: Git LFS server. The server issues pre-signed object-store URLs and never carries object bytes.
+servers:
+  - url: https://localhost:8443
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      responses:
+        "200": {description: Process is up}
+  /readyz:
+    get:
+      summary: Readiness; 503 until a fresh datastore snapshot is loaded
+      responses:
+        "200": {description: Ready}
+        "503": {description: Not ready or snapshot stale}
+  # git-lfs-authenticate returns href https://<host>/{owner}/{repo}, and the
+  # client appends /objects/batch to it.
+  /{owner}/{repo}/objects/batch:
+    post:
+      summary: LFS Batch API
+      security: [{bearer: []}]
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string, maxLength: 100}}
+        - {name: repo, in: path, required: true, schema: {type: string, maxLength: 100}}
+      requestBody:
+        required: true
+        content:
+          application/vnd.git-lfs+json:
+            schema:
+              type: object
+              required: [operation, objects]
+              properties:
+                operation: {type: string, enum: [download, upload]}
+                transfers: {type: array, items: {type: string}, description: "Must include basic when present"}
+                hash_algo: {type: string, enum: [sha256]}
+                objects:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [oid, size]
+                    properties:
+                      oid: {type: string, pattern: "^[0-9a-f]{64}$"}
+                      size: {type: integer, minimum: 0, maximum: 5368709120}
+      responses:
+        "200": {description: Per-object actions}
+        "401": {description: Missing or invalid token}
+        "403": {description: Not authorised}
+        "404": {description: Unknown repository}
+        "422": {description: Invalid request}
+  /webhooks/github:
+    post:
+      summary: GitHub webhook; body is authenticated by X-Hub-Signature-256
+      parameters:
+        - {name: X-Hub-Signature-256, in: header, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "202": {description: Accepted}
+        "401": {description: Bad signature}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "gh-user-1",
+    "kind": "person",
+    "name": "admin-user",
+    "active": true
+  },
+  {
+    "id": "gh-user-2",
+    "kind": "person",
+    "name": "maintainer",
+    "active": true
+  },
+  {
+    "id": "gh-user-3",
+    "kind": "person",
+    "name": "writer",
+    "active": true
+  },
+  {
+    "id": "gh-user-4",
+    "kind": "person",
+    "name": "triager",
+    "active": true
+  },
+  {
+    "id": "gh-user-5",
+    "kind": "person",
+    "name": "reader",
+    "active": true
+  },
+  {
+    "id": "gh-user-6",
+    "kind": "person",
+    "name": "nobody",
+    "active": true
+  }
+]

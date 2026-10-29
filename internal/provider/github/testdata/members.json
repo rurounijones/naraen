@@ -1,0 +1,8 @@
+[
+  {"id": 1, "login": "admin-user", "type": "User"},
+  {"id": 2, "login": "maintainer", "type": "User"},
+  {"id": 3, "login": "writer", "type": "User"},
+  {"id": 4, "login": "triager", "type": "User"},
+  {"id": 5, "login": "reader", "type": "User"},
+  {"id": 6, "login": "nobody", "type": "User"}
+]

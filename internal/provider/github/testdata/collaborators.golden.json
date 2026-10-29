@@ -1,0 +1,32 @@
+[
+  {
+    "identity_id": "gh-user-1",
+    "repo_id": "42",
+    "level": "admin"
+  },
+  {
+    "identity_id": "gh-user-2",
+    "repo_id": "42",
+    "level": "maintain"
+  },
+  {
+    "identity_id": "gh-user-3",
+    "repo_id": "42",
+    "level": "write"
+  },
+  {
+    "identity_id": "gh-user-4",
+    "repo_id": "42",
+    "level": "read"
+  },
+  {
+    "identity_id": "gh-user-5",
+    "repo_id": "42",
+    "level": "read"
+  },
+  {
+    "identity_id": "gh-user-7",
+    "repo_id": "42",
+    "level": "write"
+  }
+]

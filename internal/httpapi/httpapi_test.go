@@ -23,6 +23,18 @@ var teapot = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.W
 // accepted stands in for the token exchange in the same way.
 var accepted = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) })
 
+// created stands in for the webhook.
+var created = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+
+// Without a webhook handler the route does not exist.
+func TestWebhookUnmounted(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Handler(fakeReady(true), teapot, accepted, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/webhooks/github", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
 func TestEndpoints(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -41,11 +53,12 @@ func TestEndpoints(t *testing.T) {
 		{"batch too deep", true, "POST", "/acme/x/assets/objects/batch", http.StatusNotFound},
 		{"ci token", true, "POST", "/acme/assets/ci/token", http.StatusAccepted},
 		{"ci token by GET", true, "GET", "/acme/assets/ci/token", http.StatusMethodNotAllowed},
+		{"webhook", true, "POST", "/webhooks/github", http.StatusCreated},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			Handler(fakeReady(tt.ready), teapot, accepted).ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
+			Handler(fakeReady(tt.ready), teapot, accepted, created).ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
 			if rec.Code != tt.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
@@ -70,7 +83,7 @@ func TestTLS13Only(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewUnstartedServer(Handler(fakeReady(true), teapot, accepted))
+	srv := httptest.NewUnstartedServer(Handler(fakeReady(true), teapot, accepted, created))
 	srv.TLS = TLSConfig(cert)
 	srv.StartTLS()
 	defer srv.Close()

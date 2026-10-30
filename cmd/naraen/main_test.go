@@ -272,6 +272,7 @@ func TestRunServesWithConfiguredKeyMaterial(t *testing.T) {
 	otlp := otlpReceiver(t)
 	e["NARAEN_OTLP_ENDPOINT"] = otlp.URL
 	e["NARAEN_SNAPSHOT_FILE"] = snapshotFile(t)
+	e["NARAEN_GITHUB_WEBHOOK_SECRET_FILE"] = write(t, "hook", []byte("a webhook secret of enough length"))
 	logs := serveUntilCancelled(t, e, iotest.ErrReader(errors.New("must not be used")))
 	if strings.Contains(logs, "development mode") {
 		t.Errorf("production run logged dev mode: %s", logs)

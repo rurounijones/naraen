@@ -375,3 +375,22 @@ func TestS3Endpoint(t *testing.T) {
 		t.Errorf("default = %q, %v", c.S3Endpoint, err)
 	}
 }
+
+func TestWebhookSecret(t *testing.T) {
+	e := prod()
+	e["NARAEN_GITHUB_WEBHOOK_SECRET_FILE"] = "hook"
+	secret := strings.Repeat("s", 20)
+	c, err := Load(env(e), files(map[string]string{"keys": "k1 " + goodHex, "hook": " " + secret + "\n"}))
+	if err != nil || string(c.WebhookSecret) != secret {
+		t.Fatalf("secret = %q, %v", c.WebhookSecret, err)
+	}
+	if _, err := Load(env(e), files(map[string]string{"keys": "k1 " + goodHex, "hook": secret[1:]})); err == nil {
+		t.Error("19-byte secret accepted")
+	}
+	if _, err := Load(env(e), keyFile); err == nil {
+		t.Error("missing secret file accepted")
+	}
+	if c, err := Load(env(prod()), keyFile); err != nil || c.WebhookSecret != nil {
+		t.Errorf("no secret file = %q, %v", c.WebhookSecret, err)
+	}
+}

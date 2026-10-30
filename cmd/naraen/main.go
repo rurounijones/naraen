@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,6 +28,7 @@ import (
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/oidc"
+	"github.com/rurounijones/naraen/internal/provider/github"
 	"github.com/rurounijones/naraen/internal/sshd"
 	"github.com/rurounijones/naraen/internal/storage/s3store"
 	"github.com/rurounijones/naraen/internal/telemetry"
@@ -128,7 +130,13 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 		Store: store, Authz: authorizer, Tokens: tokens, Base: cfg.PublicURL,
 		Rec: rec, Log: log, Now: time.Now,
 	}
-	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batchHandler, exchange), httpapi.TLSConfig(cert))
+	// The webhook is optional: without it, access removed on GitHub stops at
+	// the next full sync instead of at once.
+	var webhook http.Handler
+	if len(cfg.WebhookSecret) > 0 {
+		webhook = &github.WebhookHandler{Secret: cfg.WebhookSecret, Store: store, Log: log}
+	}
+	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batchHandler, exchange, webhook), httpapi.TLSConfig(cert))
 
 	sshLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.SSHAddr)
 	if err != nil {

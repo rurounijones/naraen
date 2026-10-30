@@ -111,9 +111,17 @@ paths:
         content:
           application/json:
             schema: {type: object}
+      description: >-
+        Served only when a webhook secret is configured. organization
+        member_removed, member removed and deploy_key deleted remove access
+        at once; every other event is accepted and ignored. Only removals
+        are applied, so a replayed delivery can at worst deny until the next
+        full sync.
       responses:
         "202": {description: Accepted}
+        "400": {description: Malformed payload}
         "401": {description: Bad signature}
+        "413": {description: Body over 1 MiB}
 components:
   schemas:
     Error:

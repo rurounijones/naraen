@@ -84,7 +84,7 @@ func batchServer(t *testing.T) *batchTarget {
 		Log:     slog.New(slog.DiscardHandler),
 		Rand:    strings.NewReader(strings.Repeat("x", 1<<12)),
 	}
-	return &batchTarget{srv: httpapi.Handler(st, h, http.NotFoundHandler()), tokens: tokens, clock: &now, objects: objects}
+	return &batchTarget{srv: httpapi.Handler(st, h, http.NotFoundHandler(), nil), tokens: tokens, clock: &now, objects: objects}
 }
 
 func (b *batchTarget) post(path, tok, body string) int {

@@ -77,6 +77,7 @@ type env struct {
 	publicURL  string
 	knownHosts string
 	keys       map[string]string // identity name -> private key file
+	pubs       map[string]string // identity name -> public key, authorized_keys format
 	bucket     string
 	tlsCert    string        // the server certificate, trusted by git-lfs
 	home       string        // HOME for git, with git-lfs set up
@@ -300,7 +301,7 @@ func writeFile(t *testing.T, path string, data []byte) string {
 // key material from files, as in production.
 func startServer(t *testing.T) *env {
 	t.Helper()
-	e := &env{dir: t.TempDir(), keys: map[string]string{}}
+	e := &env{dir: t.TempDir(), keys: map[string]string{}, pubs: map[string]string{}}
 
 	bin := filepath.Join(e.dir, "naraen")
 	build := exec.Command("go", "build", "-buildvcs=false", "-o", bin, "github.com/rurounijones/naraen/cmd/naraen")
@@ -331,6 +332,7 @@ func startServer(t *testing.T) *env {
 		}
 		data.Identities = append(data.Identities, datastore.Identity{ID: id.name, Kind: id.kind, Name: id.name, Active: id.active})
 		data.Keys = append(data.Keys, datastore.Key{Fingerprint: ssh.FingerprintSHA256(sshPub), Type: sshPub.Type(), IdentityID: id.name})
+		e.pubs[id.name] = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
 		if id.level != datastore.LevelNone {
 			repo := "1"
 			if id.otherOnly {
@@ -411,6 +413,7 @@ func startServer(t *testing.T) *env {
 		"AWS_SHARED_CREDENTIALS_FILE=" + writeFile(t, filepath.Join(e.dir, "aws-credentials"),
 			[]byte("[default]\naws_access_key_id = "+s3SignerKey+"\naws_secret_access_key = "+s3SignerSecret+"\n")),
 		"AWS_EC2_METADATA_DISABLED=true",
+		"NARAEN_GITHUB_WEBHOOK_SECRET_FILE=" + writeFile(t, filepath.Join(e.dir, "webhook.secret"), []byte(webhookSecret)),
 	}
 	logs := &syncBuffer{}
 	e.logs = logs

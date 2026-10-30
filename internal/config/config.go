@@ -59,6 +59,10 @@ type Config struct {
 	// S3Endpoint replaces the AWS S3 endpoint, for S3-compatible storage such
 	// as SeaweedFS in development and tests. Empty means AWS.
 	S3Endpoint string
+	// WebhookSecret verifies GitHub webhook deliveries. Empty means the
+	// webhook endpoint is not served and access changes wait for the next
+	// full sync.
+	WebhookSecret []byte
 }
 
 // Getenv abstracts os.Getenv for tests.
@@ -144,11 +148,24 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 	if c.Bucket = getenv("NARAEN_S3_BUCKET"); c.Bucket != "" && !bucketName(c.Bucket) {
 		return Config{}, fmt.Errorf("config: NARAEN_S3_BUCKET must be an S3 bucket name without dots: %q", c.Bucket)
 	}
+	if path := getenv("NARAEN_GITHUB_WEBHOOK_SECRET_FILE"); path != "" {
+		raw, err := readFile(path)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: webhook secret: %w", err)
+		}
+		if c.WebhookSecret = []byte(strings.TrimSpace(string(raw))); len(c.WebhookSecret) < minWebhookSecret {
+			return Config{}, fmt.Errorf("config: webhook secret must be at least %d bytes", minWebhookSecret)
+		}
+	}
 	if !c.Dev && c.Bucket == "" {
 		return Config{}, errors.New("config: NARAEN_S3_BUCKET is required unless NARAEN_DEV=true")
 	}
 	return c, nil
 }
+
+// minWebhookSecret is the shortest webhook secret accepted. GitHub accepts
+// any length; a short one would let a forged delivery be brute-forced.
+const minWebhookSecret = 20
 
 // bucketName accepts S3 bucket names without dots: 3 to 63 lowercase letters,
 // digits and hyphens, starting and ending with a letter or digit. Dots are

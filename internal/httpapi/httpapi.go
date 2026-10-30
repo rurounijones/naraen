@@ -1,5 +1,5 @@
-// Package httpapi is the HTTPS listener: health endpoints, the Batch API and
-// the CI token exchange, with webhooks to come.
+// Package httpapi is the HTTPS listener: health endpoints, the Batch API, the
+// CI token exchange and the provider's webhook.
 package httpapi
 
 import (
@@ -26,13 +26,21 @@ const BatchPattern = "POST /{owner}/{repo}/objects/batch"
 // read-only LFS token for the repo out.
 const ExchangePattern = "POST /{owner}/{repo}/ci/token"
 
-// Handler returns the HTTPS mux. batch serves the Batch API and exchange the
-// CI token exchange; both are built by the caller, so this package needs no
-// storage, token or OIDC code.
-func Handler(r Readier, batch, exchange http.Handler) http.Handler {
+// WebhookPattern is where GitHub delivers webhooks.
+const WebhookPattern = "POST /webhooks/github"
+
+// Handler returns the HTTPS mux. batch serves the Batch API, exchange the CI
+// token exchange and webhook the provider's webhook, which is not mounted if
+// nil. All are built by the caller, so this package needs no storage, token,
+// OIDC or provider code; a provider's handler arrives as a plain
+// http.Handler.
+func Handler(r Readier, batch, exchange, webhook http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(BatchPattern, batch)
 	mux.Handle(ExchangePattern, exchange)
+	if webhook != nil {
+		mux.Handle(WebhookPattern, webhook)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

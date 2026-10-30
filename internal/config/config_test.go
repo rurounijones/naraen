@@ -347,6 +347,11 @@ func TestBucket(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	// z and 0 are the boundary bytes of the accepted ranges.
+	e["NARAEN_S3_BUCKET"] = "z0z"
+	if c, err := Load(env(e), keyFile); err != nil || c.Bucket != "z0z" {
+		t.Errorf("boundary bytes: %q, %v", c.Bucket, err)
+	}
 	delete(e, "NARAEN_S3_BUCKET")
 	if _, err := Load(env(e), keyFile); err == nil {
 		t.Error("started without a bucket outside dev mode")

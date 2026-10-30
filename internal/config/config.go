@@ -59,10 +59,32 @@ type Config struct {
 	// S3Endpoint replaces the AWS S3 endpoint, for S3-compatible storage such
 	// as SeaweedFS in development and tests. Empty means AWS.
 	S3Endpoint string
+	// GitHub configures the GitHub provider. Nil means no provider: the
+	// datastore comes from SnapshotFile, if anything.
+	GitHub *GitHub
 	// WebhookSecret verifies GitHub webhook deliveries. Empty means the
 	// webhook endpoint is not served and access changes wait for the next
 	// full sync.
 	WebhookSecret []byte
+}
+
+// GitHub is the GitHub provider's configuration.
+type GitHub struct {
+	Org            string
+	AppID          string
+	InstallationID string
+	// AppKey is the App's private key, PEM encoded: the provider's only
+	// credential.
+	AppKey []byte
+	// APIURL is the REST API's base URL; JWKSURL is where GitHub Actions'
+	// OIDC keys are fetched. Both are overridden only for tests and GitHub
+	// Enterprise.
+	APIURL  string
+	JWKSURL string
+	// Audience is the custom audience CI jobs request OIDC tokens for. Empty
+	// means CI token exchange is not set up.
+	Audience     string
+	SyncInterval time.Duration
 }
 
 // Getenv abstracts os.Getenv for tests.
@@ -157,10 +179,62 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 			return Config{}, fmt.Errorf("config: webhook secret must be at least %d bytes", minWebhookSecret)
 		}
 	}
+	if c.GitHub, err = loadGitHub(getenv, readFile); err != nil {
+		return Config{}, err
+	}
+	if c.GitHub != nil && c.SnapshotFile != "" {
+		return Config{}, errors.New("config: NARAEN_SNAPSHOT_FILE and the GitHub provider are alternatives; set one")
+	}
 	if !c.Dev && c.Bucket == "" {
 		return Config{}, errors.New("config: NARAEN_S3_BUCKET is required unless NARAEN_DEV=true")
 	}
 	return c, nil
+}
+
+// loadGitHub reads the GitHub provider settings. Org, App ID, installation ID
+// and key file are all or nothing, so a half-configured provider fails at
+// startup instead of syncing nothing.
+func loadGitHub(getenv Getenv, readFile ReadFile) (*GitHub, error) {
+	g := &GitHub{
+		Org:            getenv("NARAEN_GITHUB_ORG"),
+		AppID:          getenv("NARAEN_GITHUB_APP_ID"),
+		InstallationID: getenv("NARAEN_GITHUB_INSTALLATION_ID"),
+		Audience:       getenv("NARAEN_OIDC_AUDIENCE"),
+		SyncInterval:   15 * time.Minute,
+	}
+	keyFile := getenv("NARAEN_GITHUB_APP_KEY_FILE")
+	set := 0
+	for _, v := range []string{g.Org, g.AppID, g.InstallationID, keyFile} {
+		if v != "" {
+			set++
+		}
+	}
+	if set == 0 {
+		return nil, nil
+	}
+	if set != 4 {
+		return nil, errors.New("config: NARAEN_GITHUB_ORG, NARAEN_GITHUB_APP_ID, NARAEN_GITHUB_INSTALLATION_ID and NARAEN_GITHUB_APP_KEY_FILE must be set together")
+	}
+	raw, err := readFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("config: github app key: %w", err)
+	}
+	g.AppKey = raw
+	if g.APIURL, err = endpoint("NARAEN_GITHUB_API_URL", or(getenv("NARAEN_GITHUB_API_URL"), "https://api.github.com")); err != nil {
+		return nil, err
+	}
+	jwks := or(getenv("NARAEN_GITHUB_JWKS_URL"), "https://token.actions.githubusercontent.com/.well-known/jwks")
+	if g.JWKSURL, err = endpoint("NARAEN_GITHUB_JWKS_URL", jwks); err != nil {
+		return nil, err
+	}
+	if v := getenv("NARAEN_SYNC_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute {
+			return nil, fmt.Errorf("config: NARAEN_SYNC_INTERVAL must be a duration of at least 1m: %q", v)
+		}
+		g.SyncInterval = d
+	}
+	return g, nil
 }
 
 // minWebhookSecret is the shortest webhook secret accepted. GitHub accepts

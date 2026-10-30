@@ -28,6 +28,7 @@ import (
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/oidc"
+	"github.com/rurounijones/naraen/internal/provider"
 	"github.com/rurounijones/naraen/internal/provider/github"
 	"github.com/rurounijones/naraen/internal/sshd"
 	"github.com/rurounijones/naraen/internal/storage/s3store"
@@ -94,8 +95,15 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 			log.WarnContext(ctx, "datastore loaded from a snapshot file: no provider keeps it in step with GitHub", "file", cfg.SnapshotFile)
 		}
 	}
-	// Until a provider is wired in, the server stays not-ready and refuses all
-	// requests unless a snapshot file was supplied.
+	// With neither a snapshot file nor a provider the server stays not-ready
+	// and refuses everything.
+	if cfg.GitHub != nil {
+		p, err := githubProvider(*cfg.GitHub)
+		if err != nil {
+			return err
+		}
+		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, log)
+	}
 
 	if cfg.Dev {
 		log.WarnContext(ctx, "development mode: key material that is not configured (SSH host key, TLS certificate, signing key) is ephemeral")
@@ -288,4 +296,25 @@ func loadStorage(ctx context.Context, endpoint, bucket string) (*s3store.Store, 
 		return nil, errors.New("s3: AWS_REGION is not set")
 	}
 	return s3store.New(awsCfg, endpoint, bucket), nil
+}
+
+// githubProvider builds the GitHub provider. Its HTTP client has a timeout, so
+// a hung GitHub request fails the sync instead of stalling every later one.
+func githubProvider(g config.GitHub) (*github.Provider, error) {
+	key, err := github.ParseAppKey(g.AppKey)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	auth := &github.AppAuth{
+		BaseURL: g.APIURL, AppID: g.AppID, InstallationID: g.InstallationID,
+		Key: key, HTTP: client, Now: time.Now,
+	}
+	return &github.Provider{
+		Client:   &github.Client{BaseURL: g.APIURL, HTTP: client, Token: auth.Token},
+		Org:      g.Org,
+		Audience: g.Audience,
+		JWKSURL:  g.JWKSURL,
+		Now:      time.Now,
+	}, nil
 }

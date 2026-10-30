@@ -301,6 +301,13 @@ func writeFile(t *testing.T, path string, data []byte) string {
 // key material from files, as in production.
 func startServer(t *testing.T) *env {
 	t.Helper()
+	return startServerWith(t, nil)
+}
+
+// startServerWith is startServer with a hook that may rewrite the server's
+// environment once the client material exists.
+func startServerWith(t *testing.T, hook func(e *env, vars []string) []string) *env {
+	t.Helper()
 	e := &env{dir: t.TempDir(), keys: map[string]string{}, pubs: map[string]string{}}
 
 	bin := filepath.Join(e.dir, "naraen")
@@ -414,6 +421,9 @@ func startServer(t *testing.T) *env {
 			[]byte("[default]\naws_access_key_id = "+s3SignerKey+"\naws_secret_access_key = "+s3SignerSecret+"\n")),
 		"AWS_EC2_METADATA_DISABLED=true",
 		"NARAEN_GITHUB_WEBHOOK_SECRET_FILE=" + writeFile(t, filepath.Join(e.dir, "webhook.secret"), []byte(webhookSecret)),
+	}
+	if hook != nil {
+		srv.Env = hook(e, srv.Env)
 	}
 	logs := &syncBuffer{}
 	e.logs = logs

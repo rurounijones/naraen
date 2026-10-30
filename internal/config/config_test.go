@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func env(m map[string]string) Getenv { return func(k string) string { return m[k] } }
@@ -392,5 +393,63 @@ func TestWebhookSecret(t *testing.T) {
 	}
 	if c, err := Load(env(prod()), keyFile); err != nil || c.WebhookSecret != nil {
 		t.Errorf("no secret file = %q, %v", c.WebhookSecret, err)
+	}
+}
+
+func githubEnv() map[string]string {
+	e := prod()
+	e["NARAEN_GITHUB_ORG"] = "acme"
+	e["NARAEN_GITHUB_APP_ID"] = "12345"
+	e["NARAEN_GITHUB_INSTALLATION_ID"] = "99"
+	e["NARAEN_GITHUB_APP_KEY_FILE"] = "app.pem"
+	return e
+}
+
+var githubFiles = files(map[string]string{"keys": "k1 " + goodHex, "app.pem": "PEM"})
+
+func TestGitHub(t *testing.T) {
+	c, err := Load(env(githubEnv()), githubFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := c.GitHub
+	if g == nil || g.Org != "acme" || g.AppID != "12345" || g.InstallationID != "99" || string(g.AppKey) != "PEM" ||
+		g.APIURL != "https://api.github.com" || g.JWKSURL != "https://token.actions.githubusercontent.com/.well-known/jwks" ||
+		g.Audience != "" || g.SyncInterval != 15*time.Minute {
+		t.Fatalf("github = %+v", g)
+	}
+	e := githubEnv()
+	e["NARAEN_GITHUB_API_URL"] = "http://127.0.0.1:9000"
+	e["NARAEN_GITHUB_JWKS_URL"] = "http://127.0.0.1:9000/jwks"
+	e["NARAEN_OIDC_AUDIENCE"] = "naraen-lfs"
+	e["NARAEN_SYNC_INTERVAL"] = "1m"
+	c, err = Load(env(e), githubFiles)
+	if err != nil || c.GitHub.APIURL != "http://127.0.0.1:9000" || c.GitHub.JWKSURL != "http://127.0.0.1:9000/jwks" ||
+		c.GitHub.Audience != "naraen-lfs" || c.GitHub.SyncInterval != time.Minute {
+		t.Fatalf("overrides = %+v, %v", c.GitHub, err)
+	}
+	if c, err := Load(env(prod()), keyFile); err != nil || c.GitHub != nil {
+		t.Errorf("no provider = %+v, %v", c.GitHub, err)
+	}
+}
+
+func TestGitHubRejects(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]string){
+		"org missing":          func(e map[string]string) { delete(e, "NARAEN_GITHUB_ORG") },
+		"app id missing":       func(e map[string]string) { delete(e, "NARAEN_GITHUB_APP_ID") },
+		"installation missing": func(e map[string]string) { delete(e, "NARAEN_GITHUB_INSTALLATION_ID") },
+		"key file missing":     func(e map[string]string) { delete(e, "NARAEN_GITHUB_APP_KEY_FILE") },
+		"key file unreadable":  func(e map[string]string) { e["NARAEN_GITHUB_APP_KEY_FILE"] = "nope" },
+		"cleartext api":        func(e map[string]string) { e["NARAEN_GITHUB_API_URL"] = "http://api.example.com" },
+		"cleartext jwks":       func(e map[string]string) { e["NARAEN_GITHUB_JWKS_URL"] = "http://keys.example.com" },
+		"interval not parsed":  func(e map[string]string) { e["NARAEN_SYNC_INTERVAL"] = "often" },
+		"interval too short":   func(e map[string]string) { e["NARAEN_SYNC_INTERVAL"] = "59s" },
+		"also a snapshot file": func(e map[string]string) { e["NARAEN_SNAPSHOT_FILE"] = "snapshot.json" },
+	} {
+		e := githubEnv()
+		mutate(e)
+		if _, err := Load(env(e), githubFiles); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -491,5 +492,48 @@ func TestRunStorageError(t *testing.T) {
 	t.Setenv("AWS_REGION", "")
 	if err := run(context.Background(), env(e), rand.Reader, discard()); err == nil || !strings.Contains(err.Error(), "s3") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func appKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)})
+}
+
+func TestGitHubProvider(t *testing.T) {
+	g := config.GitHub{
+		Org: "acme", AppID: "1", InstallationID: "2", AppKey: appKeyPEM(t),
+		APIURL: "https://api.github.com", JWKSURL: "https://keys", Audience: "aud",
+	}
+	p, err := githubProvider(g)
+	if err != nil || p.Org != "acme" || p.Audience != "aud" || p.JWKSURL != "https://keys" || p.Client.BaseURL != g.APIURL {
+		t.Fatalf("provider = %+v, %v", p, err)
+	}
+	g.AppKey = []byte("not a key")
+	if _, err := githubProvider(g); err == nil {
+		t.Error("bad app key accepted")
+	}
+}
+
+// A server configured with the GitHub provider starts and syncs in the
+// background; GitHub being unreachable fails the sync, not the server.
+func TestRunWithGitHubProvider(t *testing.T) {
+	e := prodEnv(t)
+	e["NARAEN_GITHUB_ORG"] = "acme"
+	e["NARAEN_GITHUB_APP_ID"] = "1"
+	e["NARAEN_GITHUB_INSTALLATION_ID"] = "2"
+	e["NARAEN_GITHUB_APP_KEY_FILE"] = write(t, "app.pem", appKeyPEM(t))
+	e["NARAEN_GITHUB_API_URL"] = "http://127.0.0.1:1"
+	logs := serveUntilCancelled(t, e, rand.Reader)
+	if !strings.Contains(logs, "full sync failed") {
+		t.Errorf("sync failure not logged: %s", logs)
+	}
+	e["NARAEN_GITHUB_APP_KEY_FILE"] = write(t, "bad.pem", []byte("nope"))
+	if err := run(context.Background(), env(e), rand.Reader, discard()); err == nil {
+		t.Error("server started with an unparseable app key")
 	}
 }

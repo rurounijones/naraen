@@ -2,7 +2,7 @@
 
 A self-hosted Git LFS server that keeps code on GitHub but stores large files in Amazon S3. Developers authenticate with the SSH keys they already use for GitHub, GitHub decides what they may access, and file bytes go directly between the client and S3, so the server itself only handles small control requests.
 
-> **Status:** scaffold. The request-path building blocks (path normalization, OID validation, tokens, datastore, authorization, SSH key callback, Batch parsing, OIDC claim checks, webhook verification) are implemented and tested. S3 presigning, the GitHub provider's network sync and the Batch handler are not yet wired up.
+> **Status:** early. `git-lfs-authenticate` works end to end: the server authenticates the SSH key, checks the grant and returns a scoped 15-minute token. The other request-path building blocks (Batch parsing, OIDC claim checks, webhook verification) are implemented and tested. The Batch handler, S3 presigning and the GitHub provider's network sync are not built yet. Until the provider is, the datastore is loaded from a snapshot file.
 
 ## Goals
 
@@ -91,16 +91,33 @@ Everything runs in a container; no host Go toolchain is required.
 | `task ci` | `check` plus fuzz, mutation, integration, image scan and DAST |
 | `task test`, `task cover` | Unit tests, line and branch coverage gates |
 | `task fuzz`, `task mutation` | Fuzzing (`FUZZTIME=5m`) and mutation testing |
-| `task integration` | Real git/git-lfs against the server with a local S3 (`docker compose up -d s3`) |
+| `task integration` | The access matrix with real OpenSSH against the built server (git and git-lfs once the Batch API exists), with a local S3 alongside (`docker compose up -d s3`) |
 | `task image`, `task scan`, `task dast` | Build the runtime image, scan it, run DAST |
 | `task build`, `task release-check` | Release binaries for this platform, or validate the release config and build every target, in `dist/` |
+
+### Try it locally
+
+`docker compose up naraen` starts the server in development mode. It loads `test/testdata/snapshot.json`, which accepts the two committed development keys in `test/testdata/devkeys/`: `writer` may upload and download `example/repo`, and `reader` may only download. The keys are public on purpose, and only that snapshot accepts them.
+
+```sh
+chmod 600 test/testdata/devkeys/writer
+ssh -p 2222 -i test/testdata/devkeys/writer -o IdentitiesOnly=yes git@localhost git-lfs-authenticate example/repo upload
+# {"href":"https://localhost:8443/example/repo","header":{"Authorization":"Bearer v1.dev...."},"expires_in":900}
+```
+
+The host key is ephemeral in development mode, so ssh asks you to trust it on every restart.
+
+To use it from a repository, set `lfs.url` to `ssh://git@localhost:2222/example/repo`. Point `GIT_SSH_COMMAND` at the key, for example `ssh -i test/testdata/devkeys/writer -o IdentitiesOnly=yes`. `git lfs push` then authenticates and stops at the Batch API, which is not built yet.
+
+### Configuration
 
 Configuration is by environment variable. Secrets are never put in the environment, only the paths of the files that hold them:
 
 - `NARAEN_TOKEN_KEYS_FILE`: one `<id> <hex>` token key per line, at least 32 bytes each. The first line mints; later lines only verify, so a rotated key stays listed until its tokens expire.
 - `NARAEN_SSH_HOST_KEY_FILE`: the SSH host private key.
 - `NARAEN_TLS_CERT_FILE` and `NARAEN_TLS_KEY_FILE`: the TLS certificate and key.
-- `NARAEN_DEV=true`: allow any of the above to be missing and use ephemeral key material instead. Without it the server refuses to start unless all are set.
+- `NARAEN_PUBLIC_URL`: the HTTPS origin clients reach the Batch API at, such as `https://lfs.example.com`. `git-lfs-authenticate` returns it with the repo path appended. Only an origin is accepted: no path, query, fragment or userinfo.
+- `NARAEN_DEV=true`: allow any of the above to be missing and use ephemeral key material instead, with the public URL defaulting to `https://localhost:<HTTPS port>`. Without it the server refuses to start unless all are set.
 - `NARAEN_SSH_CONN_BURST` and `NARAEN_SSH_CONN_INTERVAL`: the per-source SSH connection rate limit, by default a burst of 20 and then one connection per 200ms. A source is an IPv4 address or an IPv6 /64. Raise them where many clients share one address, such as an office NAT or CI egress.
 - `NARAEN_SSH_ADDR`, `NARAEN_HTTPS_ADDR`, `NARAEN_SNAPSHOT_FILE`, `NARAEN_SNAPSHOT_MAX_AGE`.
 

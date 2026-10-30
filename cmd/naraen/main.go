@@ -24,6 +24,7 @@ import (
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/sshd"
+	"github.com/rurounijones/naraen/internal/token"
 )
 
 // exit is replaced in tests.
@@ -71,7 +72,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	// requests unless a snapshot file was supplied.
 
 	if cfg.Dev {
-		log.WarnContext(ctx, "development mode: an SSH host key or TLS certificate that is not configured is ephemeral")
+		log.WarnContext(ctx, "development mode: key material that is not configured (SSH host key, TLS certificate, signing key) is ephemeral")
 	}
 	hostKey, err := loadHostKey(cfg, random)
 	if err != nil {
@@ -81,20 +82,27 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	if err != nil {
 		return err
 	}
+	tokens, err := loadTokenSigner(cfg, random)
+	if err != nil {
+		return err
+	}
 	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store), httpapi.TLSConfig(cert))
 
 	sshLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.SSHAddr)
 	if err != nil {
 		return fmt.Errorf("ssh listen: %w", err)
 	}
-	sshCfg := sshd.NewServerConfig(hostKey, authz.New(store))
+	authorizer := authz.New(store)
+	sshCfg := sshd.NewServerConfig(hostKey, authorizer)
+	authenticate := sshd.NewAuthenticator(authorizer, tokens, cfg.PublicURL, log)
 
 	// Both servers report here when they stop; ErrServerClosed and a nil
 	// Serve result are the normal shutdown outcomes and are filtered below.
 	errc := make(chan error, 2)
-	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), refuseAll{}, log) }()
+	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), authenticate, log) }()
 	go func() { errc <- httpSrv.ListenAndServeTLS("", "") }()
-	log.InfoContext(ctx, "listening", "version", version, "ssh", cfg.SSHAddr, "https", cfg.HTTPSAddr)
+	// The public URL is the server's own origin, not a pre-signed URL.
+	log.InfoContext(ctx, "listening", "version", version, "ssh", cfg.SSHAddr, "https", cfg.HTTPSAddr, "public_url", cfg.PublicURL) // nosemgrep: naraen-log-presigned-url
 
 	var runErr error
 	select {
@@ -156,6 +164,25 @@ func loadCertificate(cfg config.Config, random io.Reader) (tls.Certificate, erro
 	return httpapi.SelfSigned(random, "localhost")
 }
 
+// loadTokenSigner builds the token signer from the configured keys, or in dev
+// mode without a key file from an ephemeral key, so tokens die with the
+// process.
+func loadTokenSigner(cfg config.Config, random io.Reader) (*token.Signer, error) {
+	keys := cfg.TokenKeys
+	if len(keys) == 0 {
+		secret := make([]byte, token.MinKeyLength)
+		if _, err := io.ReadFull(random, secret); err != nil {
+			return nil, fmt.Errorf("token key: %w", err)
+		}
+		keys = []token.Key{{ID: "dev", Secret: secret}}
+	}
+	s, err := token.NewSigner(keys, cfg.TokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("token key: %w", err)
+	}
+	return s, nil
+}
+
 func loadSnapshot(store *datastore.Store, path string) error {
 	// Freshness counts from before the file is read, as for any sync.
 	start := store.StartSync()
@@ -169,11 +196,4 @@ func loadSnapshot(store *datastore.Store, path string) error {
 		return err
 	}
 	return store.Swap(start, snap)
-}
-
-// refuseAll is the placeholder command handler until git-lfs-authenticate is built.
-type refuseAll struct{}
-
-func (refuseAll) Handle(context.Context, string, sshd.Command) ([]byte, error) {
-	return nil, errors.New("not implemented")
 }

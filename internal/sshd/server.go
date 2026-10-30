@@ -326,6 +326,11 @@ func serveSession(ctx context.Context, ch ssh.Channel, reqs <-chan *ssh.Request,
 		}
 		_ = req.Reply(true, nil)
 		out, err := h.Handle(ctx, id, cmd)
+		if errors.Is(err, ErrUnsupported) {
+			_, _ = io.WriteString(ch.Stderr(), "error: "+ErrUnsupported.Error()+"\n")
+			exit(ch, 1)
+			return
+		}
 		if err != nil {
 			log.InfoContext(ctx, "command refused", "identity", id, "command", cmd.Name)
 			_, _ = io.WriteString(ch.Stderr(), "error: request refused\n")

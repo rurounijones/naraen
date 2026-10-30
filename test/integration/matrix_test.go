@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,12 +24,9 @@ import (
 
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
+	"github.com/rurounijones/naraen/internal/lfs"
+	"github.com/rurounijones/naraen/internal/token"
 )
-
-// pendingRequestPath explains every expected failure in the matrix. When the
-// handlers exist, these cells start passing, expectFailure turns that into a
-// test failure, and the mark must be removed.
-const pendingRequestPath = "git-lfs-authenticate is a refuse-all placeholder and the Batch API and presigner are not built"
 
 // identity is one row of the access matrix.
 type identity struct {
@@ -70,43 +69,57 @@ func (id identity) mayUpload() bool {
 type env struct {
 	dir        string
 	sshPort    int
+	publicURL  string
 	knownHosts string
-	caFile     string
 	keys       map[string]string // identity name -> private key file
+	tokens     *token.Signer     // holds the key the server mints with
 }
 
+// TestAccessMatrix runs git-lfs-authenticate, the step git-lfs takes before
+// any transfer, as every identity for every operation. An allowed cell must
+// get a token for exactly that identity, repo and operation; a denied cell
+// must be refused by the server.
 func TestAccessMatrix(t *testing.T) {
-	for _, tool := range []string{"git", "git-lfs", "ssh"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not installed: %v", tool, err)
-		}
-	}
+	needSSH(t)
 	e := startServer(t)
-
-	// Every download needs an object on the server, uploaded by an identity
-	// that may upload. Until uploads work this fails, and with it every
-	// allowed download, which is expected.
-	repo := e.newRepo(t, "seed")
-	seedErr := e.lfs(t, repo, "admin", seedSource, "push", "--all", "origin")
-
 	for i, id := range matrix {
 		src := sourceFor(i)
-		t.Run(id.name+"/upload", func(t *testing.T) {
-			repo := e.newRepo(t, id.name+"-up")
-			err := e.lfs(t, repo, id.name, src, "push", "--all", "origin")
-			check(t, id.mayUpload(), err)
-		})
-		t.Run(id.name+"/download", func(t *testing.T) {
-			repo := e.newRepo(t, id.name+"-down")
-			if err := os.RemoveAll(filepath.Join(repo, ".git", "lfs", "objects")); err != nil {
-				t.Fatal(err)
+		for _, op := range []lfs.Operation{lfs.Upload, lfs.Download} {
+			allowed := id.mayDownload()
+			if op == lfs.Upload {
+				allowed = id.mayUpload()
 			}
-			err := e.lfs(t, repo, id.name, src, "fetch", "--all", "origin")
-			if err != nil && seedErr != nil {
-				err = fmt.Errorf("%w (seed upload also failed: %w)", err, seedErr)
-			}
-			check(t, id.mayDownload(), err)
-		})
+			t.Run(id.name+"/"+string(op), func(t *testing.T) {
+				out, err := e.ssh(t, id.name, src, "git-lfs-authenticate acme/assets "+string(op))
+				if !allowed {
+					checkDenied(t, err)
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.checkToken(t, out, id.name, op)
+			})
+		}
+	}
+}
+
+// git-lfs tries git-lfs-transfer first. The server says plainly that it is
+// unsupported, rather than refusing, so the client falls back to
+// git-lfs-authenticate at once.
+func TestTransferUnsupported(t *testing.T) {
+	needSSH(t)
+	e := startServer(t)
+	_, err := e.ssh(t, "admin", transferSource, "git-lfs-transfer acme/assets upload")
+	if err == nil || !strings.Contains(err.Error(), "git-lfs-transfer is not supported") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func needSSH(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skipf("ssh not installed: %v", err)
 	}
 }
 
@@ -114,8 +127,8 @@ func TestAccessMatrix(t *testing.T) {
 // would from separate machines, so the server's per-source connection rate
 // limit applies at its production defaults without one identity's
 // connections counting against the next. Linux routes all of 127.0.0.0/8 to
-// the loopback interface. The seed upload is admin on a second machine.
-const seedSource = "127.0.0.2"
+// the loopback interface.
+const transferSource = "127.0.0.2"
 
 func sourceFor(i int) string { return fmt.Sprintf("127.0.0.%d", 10+i) }
 
@@ -127,36 +140,41 @@ const (
 	requestRefused = "request refused"
 )
 
-// check asserts a matrix cell. Denials are real assertions, though until the
-// request path exists every command is refused, so they hold for that reason
-// too. Allowed cells are expected failures until then.
-func check(t *testing.T, allowed bool, err error) {
-	t.Helper()
-	if !allowed {
-		switch {
-		case err == nil:
-			t.Fatal("operation succeeded but must be denied")
-		case !strings.Contains(err.Error(), keyRefused) && !strings.Contains(err.Error(), requestRefused):
-			t.Fatalf("failed, but not by a server refusal: %v", err)
-		}
-		return
-	}
-	expectFailure(t, pendingRequestPath, requestRefused, err)
-}
-
-// expectFailure skips a cell that fails as expected, with marker in its
-// error. It fails a cell that unexpectedly passes, so the mark cannot outlive
-// its reason, and one that fails some other way, so a broken harness cannot
-// hide behind the mark.
-func expectFailure(t *testing.T, reason, marker string, err error) {
+// checkDenied asserts a denied cell: it must fail, and by a server refusal.
+func checkDenied(t *testing.T, err error) {
 	t.Helper()
 	switch {
 	case err == nil:
-		t.Fatalf("now passes; remove the expected-failure mark (%s)", reason)
-	case !strings.Contains(err.Error(), marker):
-		t.Fatalf("expected failure (%s) failed for another reason: %v", reason, err)
+		t.Fatal("operation succeeded but must be denied")
+	case !strings.Contains(err.Error(), keyRefused) && !strings.Contains(err.Error(), requestRefused):
+		t.Fatalf("failed, but not by a server refusal: %v", err)
 	}
-	t.Skipf("expected failure (%s): %v", reason, err)
+}
+
+// checkToken asserts an allowed cell's git-lfs-authenticate response: the
+// Batch API address for the repo, a bearer token that verifies for exactly
+// this identity, repo ID and operation, and the token's 15 minute lifetime.
+func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation) {
+	t.Helper()
+	var resp struct {
+		Href      string            `json:"href"`
+		Header    map[string]string `json:"header"`
+		ExpiresIn int64             `json:"expires_in"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("response %q: %v", out, err)
+	}
+	if resp.Href != e.publicURL+"/acme/assets" || resp.ExpiresIn != 900 || len(resp.Header) != 1 {
+		t.Errorf("response = %+v", resp)
+	}
+	tok, ok := strings.CutPrefix(resp.Header["Authorization"], "Bearer ")
+	if !ok {
+		t.Fatalf("authorization header = %q", resp.Header["Authorization"])
+	}
+	c, err := e.tokens.Verify(tok, "1", op)
+	if err != nil || c.Subject != as {
+		t.Errorf("token claims = %+v, %v", c, err)
+	}
 }
 
 func freePort(t *testing.T) int {
@@ -178,8 +196,8 @@ func writeFile(t *testing.T, path string, data []byte) string {
 }
 
 // startServer builds and runs the real binary with a snapshot describing the
-// matrix, a host key the client trusts explicitly, and a certificate the
-// client is told to trust, so nothing is accepted blindly.
+// matrix, a host key the client trusts explicitly, and every other piece of
+// key material from files, as in production.
 func startServer(t *testing.T) *env {
 	t.Helper()
 	e := &env{dir: t.TempDir(), keys: map[string]string{}}
@@ -249,23 +267,37 @@ func startServer(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.caFile = writeFile(t, filepath.Join(e.dir, "tls.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))
+	tlsCert := writeFile(t, filepath.Join(e.dir, "tls.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))
 	tlsKey := writeFile(t, filepath.Join(e.dir, "tls.key"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+
+	// The token key is written here rather than left ephemeral, so the test
+	// can verify what the server mints.
+	secret := make([]byte, token.MinKeyLength)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatal(err)
+	}
+	tokenKeys := writeFile(t, filepath.Join(e.dir, "token.keys"), []byte("k1 "+hex.EncodeToString(secret)+"\n"))
+	if e.tokens, err = token.NewSigner([]token.Key{{ID: "k1", Secret: secret}}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
 
 	e.sshPort = freePort(t)
 	httpsPort := freePort(t)
+	e.publicURL = fmt.Sprintf("https://localhost:%d", httpsPort)
 	hostLine := fmt.Sprintf("[127.0.0.1]:%d %s", e.sshPort, ssh.MarshalAuthorizedKey(hostSigner.PublicKey()))
 	e.knownHosts = writeFile(t, filepath.Join(e.dir, "known_hosts"), []byte(hostLine))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	srv := exec.CommandContext(ctx, bin)
+	// Every piece of key material is configured, so this is not dev mode.
 	srv.Env = []string{
-		"NARAEN_DEV=true", // the token key is still ephemeral
 		"NARAEN_SSH_ADDR=" + fmt.Sprintf("127.0.0.1:%d", e.sshPort),
 		"NARAEN_HTTPS_ADDR=" + fmt.Sprintf("127.0.0.1:%d", httpsPort),
+		"NARAEN_PUBLIC_URL=" + e.publicURL,
 		"NARAEN_SNAPSHOT_FILE=" + snapshot,
+		"NARAEN_TOKEN_KEYS_FILE=" + tokenKeys,
 		"NARAEN_SSH_HOST_KEY_FILE=" + hostKey,
-		"NARAEN_TLS_CERT_FILE=" + e.caFile,
+		"NARAEN_TLS_CERT_FILE=" + tlsCert,
 		"NARAEN_TLS_KEY_FILE=" + tlsKey,
 	}
 	logs := &strings.Builder{}
@@ -295,71 +327,23 @@ func startServer(t *testing.T) *env {
 	}
 }
 
-// git runs git in dir with a hermetic configuration.
-func (e *env) git(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = e.baseEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-}
-
-func (e *env) baseEnv() []string {
-	return []string{
-		"HOME=" + e.dir,
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_AUTHOR_NAME=matrix", "GIT_AUTHOR_EMAIL=matrix@example.com",
-		"GIT_COMMITTER_NAME=matrix", "GIT_COMMITTER_EMAIL=matrix@example.com",
-	}
-}
-
-// newRepo creates a repository with one committed LFS object, a local bare
-// remote, and lfs.url pointing at the server over SSH, as .lfsconfig would.
-func (e *env) newRepo(t *testing.T, name string) string {
-	t.Helper()
-	dir := filepath.Join(e.dir, name)
-	remote := dir + ".git"
-	for _, d := range []string{dir, remote} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	e.git(t, remote, "init", "-q", "--bare")
-	e.git(t, dir, "init", "-q", "-b", "main")
-	e.git(t, dir, "lfs", "install", "--local")
-	e.git(t, dir, "config", "lfs.url", fmt.Sprintf("ssh://git@127.0.0.1:%d/acme/assets", e.sshPort))
-	// The locks API is not implemented; .lfsconfig disables verification.
-	e.git(t, dir, "config", "lfs.locksverify", "false")
-	e.git(t, dir, "config", "lfs.transfer.maxretries", "1")
-	e.git(t, dir, "config", "http.sslCAInfo", e.caFile)
-	e.git(t, dir, "remote", "add", "origin", remote)
-	e.git(t, dir, "lfs", "track", "*.bin")
-	// The same content in every repo, so every download asks for the seeded object.
-	writeFile(t, filepath.Join(dir, "asset.bin"), []byte("naraen access matrix object\n"))
-	e.git(t, dir, "add", ".gitattributes", "asset.bin")
-	e.git(t, dir, "commit", "-q", "-m", "asset")
-	return dir
-}
-
-// lfs runs a git lfs subcommand in repo as the named identity, connecting
-// from the source address src, and returns its error, with output, if it
-// fails.
-func (e *env) lfs(t *testing.T, repo, as, src string, args ...string) error {
+// ssh runs command on the server as the named identity, from the source
+// address src, with real OpenSSH configured so nothing is accepted blindly:
+// only that identity's key, and only the server's known host key. It returns
+// stdout, or an error carrying stderr.
+func (e *env) ssh(t *testing.T, as, src, command string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"lfs"}, args...)...)
-	cmd.Dir = repo
-	sshCmd := fmt.Sprintf("ssh -F /dev/null -i %s -o BindAddress=%s -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s",
-		e.keys[as], src, e.knownHosts)
-	cmd.Env = append(e.baseEnv(), "GIT_SSH_COMMAND="+sshCmd)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git lfs %s as %s: %w: %s", strings.Join(args, " "), as, err, strings.TrimSpace(string(out)))
+	cmd := exec.CommandContext(ctx, "ssh", "-F", "/dev/null", "-p", strconv.Itoa(e.sshPort),
+		"-i", e.keys[as], "-o", "BindAddress="+src, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+e.knownHosts,
+		"git@127.0.0.1", command)
+	cmd.Env = []string{"HOME=" + e.dir, "PATH=" + os.Getenv("PATH")}
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%s as %s: %w: %s", command, as, err, strings.TrimSpace(stderr.String()))
 	}
-	return nil
+	return stdout.String(), nil
 }

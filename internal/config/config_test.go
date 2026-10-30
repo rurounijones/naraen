@@ -27,6 +27,7 @@ func prod() map[string]string {
 		"NARAEN_SSH_HOST_KEY_FILE": "host",
 		"NARAEN_TLS_CERT_FILE":     "cert",
 		"NARAEN_TLS_KEY_FILE":      "key",
+		"NARAEN_PUBLIC_URL":        "https://lfs.example.com",
 	}
 }
 
@@ -125,6 +126,61 @@ func TestLoadTokenKeys(t *testing.T) {
 	e["NARAEN_TOKEN_KEYS_FILE"] = "missing"
 	if _, err := Load(env(e), keyFile); err == nil {
 		t.Error("missing key file accepted")
+	}
+}
+
+func TestPublicURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://lfs.example.com":      "https://lfs.example.com",
+		"https://lfs.example.com/":     "https://lfs.example.com",
+		"https://lfs.example.com:8443": "https://lfs.example.com:8443",
+		"https://[2001:db8::1]:8443/":  "https://[2001:db8::1]:8443",
+		"https://LFS.example.com:443/": "https://LFS.example.com:443",
+		"https://127.0.0.1:12345":      "https://127.0.0.1:12345",
+	} {
+		e := prod()
+		e["NARAEN_PUBLIC_URL"] = in
+		c, err := Load(env(e), keyFile)
+		if err != nil || c.PublicURL != want {
+			t.Errorf("%q: got %q, %v; want %q", in, c.PublicURL, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"https://[::1",                // unparseable
+		"http://lfs.example.com",      // not TLS
+		"lfs.example.com",             // no scheme
+		"https://",                    // no host
+		"https://:443",                // port but no host
+		"https://u:p@lfs.example.com", // userinfo
+		"https://lfs.example.com/lfs", // a path
+		"https://lfs.example.com?a=b", // a query
+		"https://lfs.example.com?",    // an empty query
+		"https://lfs.example.com#top", // a fragment
+	} {
+		e := prod()
+		e["NARAEN_PUBLIC_URL"] = bad
+		if _, err := Load(env(e), keyFile); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	e := prod()
+	delete(e, "NARAEN_PUBLIC_URL")
+	if _, err := Load(env(e), keyFile); err == nil {
+		t.Error("started without NARAEN_PUBLIC_URL outside dev mode")
+	}
+	// Dev mode defaults to localhost on the HTTPS listen port.
+	for addr, want := range map[string]string{
+		"":               "https://localhost:443",
+		":8443":          "https://localhost:8443",
+		"127.0.0.1:2443": "https://localhost:2443",
+	} {
+		c, err := Load(env(map[string]string{"NARAEN_DEV": "true", "NARAEN_HTTPS_ADDR": addr}), keyFile)
+		if err != nil || c.PublicURL != want {
+			t.Errorf("dev default for %q = %q, %v; want %q", addr, c.PublicURL, err, want)
+		}
+	}
+	if _, err := Load(env(map[string]string{"NARAEN_DEV": "true", "NARAEN_HTTPS_ADDR": "no-port"}), keyFile); err == nil {
+		t.Error("dev default from an address without a port accepted")
 	}
 }
 

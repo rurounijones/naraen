@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,11 @@ import (
 type Config struct {
 	SSHAddr   string
 	HTTPSAddr string
+	// PublicURL is the HTTPS origin clients reach the Batch API at, such as
+	// https://lfs.example.com, with no trailing slash. git-lfs-authenticate
+	// returns it, so it must be the name clients use, which the listen address
+	// does not tell.
+	PublicURL string
 	// Dev allows ephemeral key material (token key, SSH host key, TLS
 	// certificate) for anything not configured. Without it, all three are
 	// required, so a production server cannot start on throwaway keys.
@@ -79,6 +86,10 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 	if !c.Dev && (len(c.TokenKeys) == 0 || c.SSHHostKeyFile == "" || c.TLSCertFile == "") {
 		return Config{}, errors.New("config: NARAEN_TOKEN_KEYS_FILE, NARAEN_SSH_HOST_KEY_FILE and the TLS files are required unless NARAEN_DEV=true")
 	}
+	var err error
+	if c.PublicURL, err = publicURL(getenv("NARAEN_PUBLIC_URL"), c.HTTPSAddr, c.Dev); err != nil {
+		return Config{}, err
+	}
 	if v := getenv("NARAEN_SNAPSHOT_MAX_AGE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
@@ -125,6 +136,29 @@ func parseKeys(s string) ([]token.Key, error) {
 		return nil, fmt.Errorf("config: token keys: %w", err)
 	}
 	return keys, nil
+}
+
+// publicURL validates NARAEN_PUBLIC_URL: an https origin and nothing else, so
+// the repo path appended to it cannot be redirected by a stray path, query,
+// fragment or userinfo. In dev mode it defaults to localhost on the HTTPS
+// listen port, which is where a local client reaches a local server.
+func publicURL(v, httpsAddr string, dev bool) (string, error) {
+	if v == "" {
+		if !dev {
+			return "", errors.New("config: NARAEN_PUBLIC_URL is required unless NARAEN_DEV=true")
+		}
+		_, port, err := net.SplitHostPort(httpsAddr)
+		if err != nil {
+			return "", fmt.Errorf("config: NARAEN_HTTPS_ADDR: %w", err)
+		}
+		return "https://" + net.JoinHostPort("localhost", port), nil
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("config: NARAEN_PUBLIC_URL must be an https origin such as https://lfs.example.com: %q", v)
+	}
+	return "https://" + u.Host, nil
 }
 
 func or(v, def string) string {

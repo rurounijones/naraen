@@ -20,10 +20,13 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/config"
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
+	"github.com/rurounijones/naraen/internal/lfs"
 	"github.com/rurounijones/naraen/internal/sshd"
+	"github.com/rurounijones/naraen/internal/token"
 )
 
 // snapshotFile writes a minimal valid snapshot, so these tests do not depend
@@ -85,6 +88,7 @@ func prodEnv(t *testing.T) map[string]string {
 		"NARAEN_SSH_HOST_KEY_FILE": write(t, "host", pem.EncodeToMemory(hostPEM)),
 		"NARAEN_TLS_CERT_FILE":     write(t, "cert", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})),
 		"NARAEN_TLS_KEY_FILE":      write(t, "key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
+		"NARAEN_PUBLIC_URL":        "https://lfs.example.com",
 	}
 }
 
@@ -254,10 +258,81 @@ func TestLoadSnapshot(t *testing.T) {
 	}
 }
 
-func TestRefuseAll(t *testing.T) {
-	out, err := refuseAll{}.Handle(context.Background(), "id", sshd.Command{})
-	if err == nil || out != nil {
-		t.Fatalf("out = %v, err = %v", out, err)
+func TestRunTokenKeyError(t *testing.T) {
+	// Every byte zero: the host key and certificate accept it, but an
+	// ephemeral token key of one repeated byte is refused.
+	err := run(context.Background(), env(devEnv()), bytes.NewReader(make([]byte, 1<<16)), discard())
+	if err == nil || !strings.Contains(err.Error(), "token key") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadTokenSigner(t *testing.T) {
+	configured := []token.Key{{ID: "k1", Secret: []byte("0123456789abcdef0123456789abcdef")}}
+	s, err := loadTokenSigner(config.Config{TokenKeys: configured, TokenTTL: time.Minute}, iotest.ErrReader(errors.New("must not be used")))
+	if err != nil || s.TTL() != time.Minute {
+		t.Fatalf("configured keys: %v, %v", s, err)
+	}
+	// A token minted by the configured key verifies with a signer built from
+	// that key alone, so the configured key is the one minting.
+	tok, _ := s.Mint("alice", "1", lfs.Download)
+	only, err := token.NewSigner(configured, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := only.Verify(tok, "1", lfs.Download); err != nil {
+		t.Errorf("token not minted by the configured key: %v", err)
+	}
+
+	dev, err := loadTokenSigner(config.Config{TokenTTL: time.Minute}, rand.Reader)
+	if err != nil {
+		t.Fatalf("ephemeral key: %v", err)
+	}
+	devTok, _ := dev.Mint("alice", "1", lfs.Download)
+	if _, err := only.Verify(devTok, "1", lfs.Download); err == nil {
+		t.Error("ephemeral signer minted with the configured key")
+	}
+	if _, err := loadTokenSigner(config.Config{TokenTTL: time.Minute}, iotest.ErrReader(errors.New("no entropy"))); err == nil {
+		t.Error("ephemeral key without entropy accepted")
+	}
+	if _, err := loadTokenSigner(config.Config{TokenKeys: configured}, rand.Reader); err == nil {
+		t.Error("zero TTL accepted")
+	}
+}
+
+// TestDevSnapshotFixture holds the committed dev keys and the snapshot that
+// compose loads together: each public key must authenticate as the identity
+// it is named after, so the README's local walkthrough keeps working.
+func TestDevSnapshotFixture(t *testing.T) {
+	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
+	if err := loadSnapshot(store, filepath.Join("..", "..", "test", "testdata", "snapshot.json")); err != nil {
+		t.Fatal(err)
+	}
+	a := authz.New(store)
+	for name, ops := range map[string][]lfs.Operation{
+		"writer": {lfs.Download, lfs.Upload},
+		"reader": {lfs.Download},
+	} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "test", "testdata", "devkeys", name+".pub"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := a.IdentityForKey(ssh.FingerprintSHA256(pub))
+		if err != nil || id.ID != name {
+			t.Fatalf("%s.pub authenticates as %q, %v", name, id.ID, err)
+		}
+		for _, op := range ops {
+			if _, err := a.Authorize(id.ID, "example/repo", op); err != nil {
+				t.Errorf("%s may not %s example/repo: %v", name, op, err)
+			}
+		}
+	}
+	if _, err := a.Authorize("reader", "example/repo", lfs.Upload); err == nil {
+		t.Error("reader may upload")
 	}
 }
 

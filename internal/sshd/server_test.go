@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +165,43 @@ func TestServeRefusals(t *testing.T) {
 	defer sess.Close()
 	if err := sess.Shell(); err == nil {
 		t.Error("interactive shell must be refused")
+	}
+}
+
+// stderrOf runs cmd and returns what it wrote to stderr and its error.
+func stderrOf(t *testing.T, c *ssh.Client, cmd string) (string, error) {
+	t.Helper()
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	var stderr strings.Builder
+	sess.Stderr = &stderr
+	err = sess.Run(cmd)
+	return stderr.String(), err
+}
+
+// A refusal names no reason, but git-lfs-transfer being unsupported is not a
+// refusal of access and is said plainly, so git-lfs falls back at once.
+func TestServeReportsUnsupportedAndRefusedDifferently(t *testing.T) {
+	alice := newSigner(t)
+	for handlerErr, want := range map[error]string{
+		ErrUnsupported:       "error: git-lfs-transfer is not supported\n",
+		authz.ErrDenied:      "error: request refused\n",
+		errors.New("secret"): "error: request refused\n",
+	} {
+		addr, hostPub := start(t, alice, &recordingHandler{err: handlerErr})
+		c, err := dial(addr, hostPub, alice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stderr, err := stderrOf(t, c, "git-lfs-transfer acme/assets upload")
+		c.Close()
+		var exitErr *ssh.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 1 || stderr != want {
+			t.Errorf("%v: stderr = %q, err = %v", handlerErr, stderr, err)
+		}
 	}
 }
 

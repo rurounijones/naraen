@@ -69,7 +69,7 @@ tasks:
       - FUZZTIME={{.FUZZTIME}} scripts/fuzz.sh
 
   integration:
-    desc: Real git + git-lfs against the server with a local S3
+    desc: Access matrix with real clients against the built server, with a local S3
     cmds: [go test -tags integration -count=1 ./test/integration/...]
 
   bench:

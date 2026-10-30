@@ -76,6 +76,11 @@ func Narrowing(event string, body []byte) (datastore.Narrowing, error) {
 	return n, nil
 }
 
+// empty reports whether n removes nothing.
+func empty(n datastore.Narrowing) bool {
+	return len(n.DeactivateIdentities) == 0 && len(n.DropGrants) == 0 && len(n.RevokeKeys) == 0
+}
+
 // Narrower is the part of the datastore a webhook writes to.
 type Narrower interface{ Narrow(datastore.Narrowing) }
 
@@ -109,7 +114,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "malformed payload", http.StatusBadRequest)
 		return
 	}
-	if len(n.DeactivateIdentities)+len(n.DropGrants)+len(n.RevokeKeys) > 0 {
+	if !empty(n) {
 		h.Store.Narrow(n)
 		log.InfoContext(ctx, "webhook applied", "deactivated", n.DeactivateIdentities,
 			"revoked_keys", n.RevokeKeys, "dropped_grants", len(n.DropGrants))

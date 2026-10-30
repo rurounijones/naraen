@@ -112,6 +112,19 @@ func TestWebhookHandler(t *testing.T) {
 	if code := post("ping", ping, sign(secret, ping)); code != http.StatusAccepted || len(store.got) != 1 {
 		t.Errorf("ping: %d, narrowed %d", code, len(store.got))
 	}
+	// Each kind of removal on its own is applied.
+	key, fp := deployKey(t)
+	collab := []byte(`{"action":"removed","member":{"id":42},"repository":{"id":7}}`)
+	deleted := []byte(`{"action":"deleted","key":{"key":"` + key + `"}}`)
+	if code := post("member", collab, sign(secret, collab)); code != http.StatusAccepted {
+		t.Errorf("collaborator removal: %d", code)
+	}
+	if code := post("deploy_key", deleted, sign(secret, deleted)); code != http.StatusAccepted {
+		t.Errorf("deploy key deletion: %d", code)
+	}
+	if len(store.got) != 3 || len(store.got[1].DropGrants) != 1 || store.got[2].RevokeKeys[0] != fp {
+		t.Fatalf("narrowed = %+v", store.got)
+	}
 	for name, tt := range map[string]struct {
 		body []byte
 		sig  string
@@ -126,7 +139,7 @@ func TestWebhookHandler(t *testing.T) {
 			t.Errorf("%s: %d, want %d", name, code, tt.want)
 		}
 	}
-	if len(store.got) != 1 {
+	if len(store.got) != 3 {
 		t.Errorf("a refused delivery narrowed access: %+v", store.got)
 	}
 }

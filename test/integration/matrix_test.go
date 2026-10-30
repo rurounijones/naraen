@@ -78,7 +78,10 @@ type env struct {
 	publicURL  string
 	knownHosts string
 	keys       map[string]string // identity name -> private key file
-	tokens     *token.Signer     // holds the key the server mints with
+	bucket     string
+	tlsCert    string        // the server certificate, trusted by git-lfs
+	home       string        // HOME for git, with git-lfs set up
+	tokens     *token.Signer // holds the key the server mints with
 }
 
 // TestAccessMatrix runs git-lfs-authenticate, the step git-lfs takes before
@@ -364,7 +367,7 @@ func startServer(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsCert := writeFile(t, filepath.Join(e.dir, "tls.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))
+	e.tlsCert = writeFile(t, filepath.Join(e.dir, "tls.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}))
 	tlsKey := writeFile(t, filepath.Join(e.dir, "tls.key"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
 
 	// The token key is written here rather than left ephemeral, so the test
@@ -384,6 +387,9 @@ func startServer(t *testing.T) *env {
 	hostLine := fmt.Sprintf("[127.0.0.1]:%d %s", e.sshPort, ssh.MarshalAuthorizedKey(hostSigner.PublicKey()))
 	e.knownHosts = writeFile(t, filepath.Join(e.dir, "known_hosts"), []byte(hostLine))
 
+	e.bucket = newBucket(t)
+	e.gitEnv(t)
+
 	e.otlp = newOTLPReceiver(t)
 	srv := exec.Command(bin)
 	// Every piece of key material is configured, so this is not dev mode.
@@ -395,10 +401,14 @@ func startServer(t *testing.T) *env {
 		"NARAEN_SNAPSHOT_FILE=" + snapshot,
 		"NARAEN_TOKEN_KEYS_FILE=" + tokenKeys,
 		"NARAEN_SSH_HOST_KEY_FILE=" + hostKey,
-		"NARAEN_TLS_CERT_FILE=" + tlsCert,
+		"NARAEN_TLS_CERT_FILE=" + e.tlsCert,
 		"NARAEN_TLS_KEY_FILE=" + tlsKey,
-		"NARAEN_S3_BUCKET=acme-lfs",
+		"NARAEN_S3_ENDPOINT=" + s3Endpoint,
+		"NARAEN_S3_BUCKET=" + e.bucket,
 		"AWS_REGION=us-east-1",
+		"AWS_CONFIG_FILE=" + writeFile(t, filepath.Join(e.dir, "aws-config"), nil),
+		"AWS_SHARED_CREDENTIALS_FILE=" + writeFile(t, filepath.Join(e.dir, "aws-credentials"),
+			[]byte("[default]\naws_access_key_id = "+s3SignerKey+"\naws_secret_access_key = "+s3SignerSecret+"\n")),
 		"AWS_EC2_METADATA_DISABLED=true",
 	}
 	logs := &syncBuffer{}

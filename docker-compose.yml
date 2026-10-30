@@ -7,9 +7,12 @@ services:
   # pullable images, so SeaweedFS stands in. Swap S3_IMAGE to change it.
   s3:
     image: ${S3_IMAGE:-chrislusf/seaweedfs:latest@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
-    command: ["server", "-s3", "-dir=/data"]
+    # The identities file turns on signature checks; without it SeaweedFS
+    # serves anyone, and tests of signed links would prove nothing. The
+    # credentials in it are public development values.
+    command: ["server", "-s3", "-dir=/data", "-s3.config=/etc/seaweedfs/s3.json"]
     ports: ["127.0.0.1:8333:8333"]
-    volumes: ["s3-data:/data"]
+    volumes: ["s3-data:/data", "./test/testdata/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro"]
 
   naraen:
     build:

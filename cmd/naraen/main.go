@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -24,6 +25,7 @@ import (
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/sshd"
+	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/token"
 )
 
@@ -37,12 +39,12 @@ var version = "dev"
 const shutdownTimeout = 10 * time.Second
 
 func main() {
-	exit(realMain(os.Getenv, os.Stderr))
+	exit(realMain(os.Getenv, os.Stdout))
 }
 
 // realMain runs the server until SIGINT or SIGTERM and returns the exit code.
-func realMain(getenv config.Getenv, stderr io.Writer) int {
-	log := slog.New(slog.NewJSONHandler(stderr, nil))
+func realMain(getenv config.Getenv, stdout io.Writer) int {
+	log := slog.New(slog.NewJSONHandler(stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, getenv, rand.Reader, log); err != nil {
@@ -61,6 +63,20 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+
+	tel, err := telemetry.New(ctx, telemetry.Export{Endpoint: cfg.OTLPEndpoint, Headers: cfg.OTLPHeaders, Version: version})
+	if err != nil {
+		return err
+	}
+	// Telemetry's own failures are reported to the local log only, never
+	// back into the pipeline that failed.
+	local := log
+	otel.SetErrorHandler(telemetry.ErrorHandler(local))
+	defer flushTelemetry(tel, local)
+	log = slog.New(tel.LogHandler(local.Handler()))
+	if cfg.OTLPEndpoint == "" {
+		log.WarnContext(ctx, "metrics and logs are not exported: NARAEN_OTLP_ENDPOINT is not set")
+	}
 
 	store := datastore.NewStore(cfg.SnapshotMaxAge, datastore.DefaultLimits)
 	if cfg.SnapshotFile != "" {
@@ -215,4 +231,15 @@ func loadSnapshot(store *datastore.Store, path string, dev bool) error {
 		}
 	}
 	return store.Swap(start, snap)
+}
+
+// flushTelemetry pushes the metrics and logs recorded since the last export. A
+// collector that cannot be reached at shutdown costs that data, not a failed
+// exit.
+func flushTelemetry(tel *telemetry.Providers, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := tel.Shutdown(ctx); err != nil {
+		log.WarnContext(ctx, "telemetry flush failed", "error", err)
+	}
 }

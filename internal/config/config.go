@@ -44,6 +44,15 @@ type Config struct {
 	// office NAT or CI egress). Zero keeps the server's default.
 	SSHConnBurst    int
 	SSHConnInterval time.Duration
+	// OTLPEndpoint is the OTLP/HTTP base URL, such as
+	// https://openobserve.internal:5080/api/default, without a trailing
+	// slash; metrics and logs go to /v1/metrics and /v1/logs under it.
+	// Optional; empty means metrics are recorded but not exported, and logs
+	// go to stdout only.
+	OTLPEndpoint string
+	// OTLPHeaders are sent with every export, typically the ingestion
+	// credential, so they come from a file, never the environment.
+	OTLPHeaders map[string]string
 }
 
 // Getenv abstracts os.Getenv for tests.
@@ -111,7 +120,73 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 		}
 		c.SSHConnInterval = d
 	}
+	if c.OTLPEndpoint, err = otlpEndpoint(getenv("NARAEN_OTLP_ENDPOINT")); err != nil {
+		return Config{}, err
+	}
+	if path := getenv("NARAEN_OTLP_HEADERS_FILE"); path != "" {
+		raw, err := readFile(path)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: otlp headers: %w", err)
+		}
+		if c.OTLPHeaders, err = parseHeaders(string(raw)); err != nil {
+			return Config{}, err
+		}
+	}
 	return c, nil
+}
+
+// otlpEndpoint validates NARAEN_OTLP_ENDPOINT. Exports carry the ingestion
+// credential and identify users and repos, so they go over https, except to a
+// loopback address, where a local collector or a test receiver listens and
+// nothing crosses the network. Empty disables export.
+func otlpEndpoint(v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" ||
+		(u.Scheme != "https" && (u.Scheme != "http" || !loopback(u.Hostname()))) {
+		return "", fmt.Errorf("config: NARAEN_OTLP_ENDPOINT must be an https URL, or http to a loopback address: %q", v)
+	}
+	return strings.TrimSuffix(v, "/"), nil
+}
+
+func loopback(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+// parseHeaders reads one "Name: value" header per non-empty line.
+func parseHeaders(s string) (map[string]string, error) {
+	h := map[string]string{}
+	for n, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(line, ":")
+		value = strings.TrimSpace(value)
+		if !ok || !headerName(name) || value == "" {
+			// The line may hold a credential, so it is not echoed.
+			return nil, fmt.Errorf("config: otlp headers line %d must be \"Name: value\"", n+1)
+		}
+		h[name] = value
+	}
+	return h, nil
+}
+
+// headerName accepts the letters, digits and hyphens that real header names
+// use, a subset of RFC 9110's token.
+func headerName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // parseKeys reads one "<id> <hex secret>" pair per non-empty line. The first

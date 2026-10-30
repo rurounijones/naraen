@@ -28,6 +28,7 @@ func prod() map[string]string {
 		"NARAEN_TLS_CERT_FILE":     "cert",
 		"NARAEN_TLS_KEY_FILE":      "key",
 		"NARAEN_PUBLIC_URL":        "https://lfs.example.com",
+		"NARAEN_OTLP_ENDPOINT":     "https://otel.example.com",
 	}
 }
 
@@ -223,5 +224,92 @@ func TestSSHConnRate(t *testing.T) {
 		if _, err := Load(env(e), keyFile); err == nil {
 			t.Errorf("interval %q accepted", bad)
 		}
+	}
+}
+
+func TestOTLPEndpoint(t *testing.T) {
+	for good, want := range map[string]string{
+		"https://otel.example.com":                      "https://otel.example.com",
+		"https://otel.example.com/":                     "https://otel.example.com",
+		"https://openobserve.internal:5080/api/default": "https://openobserve.internal:5080/api/default",
+		"http://localhost:4318":                         "http://localhost:4318",
+		"http://127.0.0.1:4318/":                        "http://127.0.0.1:4318",
+		"http://127.0.0.9:4318":                         "http://127.0.0.9:4318",
+		"http://[::1]:4318":                             "http://[::1]:4318",
+	} {
+		e := prod()
+		e["NARAEN_OTLP_ENDPOINT"] = good
+		c, err := Load(env(e), keyFile)
+		if err != nil || c.OTLPEndpoint != want {
+			t.Errorf("%q: got %q, %v; want %q", good, c.OTLPEndpoint, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"https://[::1",                        // unparseable
+		"http://otel.example.com/v1/metrics",  // cleartext over the network
+		"http://10.0.0.5:4318/v1/metrics",     // cleartext, not loopback
+		"ftp://localhost/v1/metrics",          // not HTTP
+		"otel.example.com/v1/metrics",         // no scheme
+		"https:///v1/metrics",                 // no host
+		"https://u:p@otel.example.com/",       // userinfo
+		"https://otel.example.com/v1#metrics", // a fragment
+	} {
+		e := prod()
+		e["NARAEN_OTLP_ENDPOINT"] = bad
+		if _, err := Load(env(e), keyFile); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	e := prod()
+	delete(e, "NARAEN_OTLP_ENDPOINT")
+	c, err := Load(env(e), keyFile)
+	if err != nil || c.OTLPEndpoint != "" {
+		t.Errorf("no endpoint = %q, %v; want no export", c.OTLPEndpoint, err)
+	}
+}
+
+func TestOTLPHeaders(t *testing.T) {
+	e := prod()
+	e["NARAEN_OTLP_HEADERS_FILE"] = "headers"
+	// Az-Z09 holds every boundary byte of the accepted ranges.
+	c, err := Load(env(e), files(map[string]string{
+		"keys":    "k1 " + goodHex,
+		"headers": "\n Authorization:  Basic c2VjcmV0 \n\nX-Stream-0: a:b\nAz-Z09: c\n",
+	}))
+	if err != nil || len(c.OTLPHeaders) != 3 || c.OTLPHeaders["Authorization"] != "Basic c2VjcmV0" ||
+		c.OTLPHeaders["X-Stream-0"] != "a:b" || c.OTLPHeaders["Az-Z09"] != "c" {
+		t.Fatalf("headers = %q, %v", c.OTLPHeaders, err)
+	}
+	if c, err := Load(env(prod()), keyFile); err != nil || c.OTLPHeaders != nil {
+		t.Errorf("no headers file = %q, %v", c.OTLPHeaders, err)
+	}
+	for name, content := range map[string]string{
+		"no colon":      "Authorization Basic x",
+		"no value":      "Authorization:",
+		"blank value":   "Authorization:   ",
+		"no name":       ": x",
+		"space in name": "X Auth: x",
+		"bad byte":      "X_Auth: x",
+		"below digits":  "X/Auth: x",
+		"above lower":   "X{Auth: x",
+		"above upper":   "X[Auth: x",
+		"below upper":   "X@Auth: x",
+		"above digits":  "X;Auth: x",
+		"below lower":   "X`Auth: x",
+	} {
+		_, err := Load(env(e), files(map[string]string{"keys": "k1 " + goodHex, "headers": content}))
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		} else if strings.Contains(err.Error(), content) {
+			t.Errorf("%s: error echoes the line: %v", name, err)
+		}
+	}
+	_, err = Load(env(e), files(map[string]string{"keys": "k1 " + goodHex, "headers": "A: 1\n\nbroken"}))
+	if err == nil || !strings.Contains(err.Error(), "line 3 ") {
+		t.Errorf("error for line 3 = %v", err)
+	}
+	e["NARAEN_OTLP_HEADERS_FILE"] = "missing"
+	if _, err := Load(env(e), keyFile); err == nil {
+		t.Error("missing headers file accepted")
 	}
 }

@@ -12,11 +12,11 @@ import (
 func TestRealMainShutsDownOnSignal(t *testing.T) {
 	e := devEnv()
 	e["NARAEN_SNAPSHOT_FILE"] = snapshotFile(t)
-	stderr := &syncBuffer{}
+	stdout := &syncBuffer{}
 	done := make(chan int, 1)
-	go func() { done <- realMain(env(e), stderr) }()
+	go func() { done <- realMain(env(e), stdout) }()
 	deadline := time.Now().Add(10 * time.Second)
-	for !strings.Contains(stderr.String(), "listening") {
+	for !strings.Contains(stdout.String(), "listening") {
 		if time.Now().After(deadline) {
 			t.Fatal("server never started listening")
 		}
@@ -30,7 +30,7 @@ func TestRealMainShutsDownOnSignal(t *testing.T) {
 	select {
 	case code := <-done:
 		if code != 0 {
-			t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+			t.Fatalf("exit code = %d, stdout = %s", code, stdout.String())
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("server did not shut down")

@@ -22,3 +22,6 @@ const (
 	LabelReason       = "reason"
 	LabelIdentityType = "identity_type"
 )
+
+// scopeName scopes every instrument and log record to this server.
+const scopeName = "github.com/rurounijones/naraen"

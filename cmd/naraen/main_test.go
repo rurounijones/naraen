@@ -10,6 +10,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +29,7 @@ import (
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/lfs"
 	"github.com/rurounijones/naraen/internal/sshd"
+	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/token"
 )
 
@@ -90,7 +93,36 @@ func prodEnv(t *testing.T) map[string]string {
 		"NARAEN_TLS_CERT_FILE":     write(t, "cert", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})),
 		"NARAEN_TLS_KEY_FILE":      write(t, "key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
 		"NARAEN_PUBLIC_URL":        "https://lfs.example.com",
+		"NARAEN_OTLP_ENDPOINT":     otlpReceiver(t).URL,
 	}
+}
+
+// receiver counts OTLP pushes by path, so a test can tell that metrics and
+// logs left the process.
+type receiver struct {
+	*httptest.Server
+	mu     sync.Mutex
+	pushes map[string]int
+}
+
+func (r *receiver) count(path string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pushes[path]
+}
+
+func otlpReceiver(t *testing.T) *receiver {
+	t.Helper()
+	r := &receiver{pushes: map[string]int{}}
+	r.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		r.mu.Lock()
+		r.pushes[req.URL.Path]++
+		r.mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-protobuf")
+	}))
+	t.Cleanup(r.Close)
+	return r
 }
 
 // syncBuffer lets the test read what the server logs while it runs.
@@ -214,10 +246,14 @@ func TestRunServesUntilCancelled(t *testing.T) {
 }
 
 // With every piece of key material configured, no randomness is needed and no
-// development warning is logged, and a snapshot file used outside dev mode is
+// development warning is logged. Metrics and logs reach the configured
+// endpoint at the latest when the server flushes them on shutdown, logs still
+// reach the local log too, and a snapshot file used outside dev mode is
 // called out.
 func TestRunServesWithConfiguredKeyMaterial(t *testing.T) {
 	e := prodEnv(t)
+	otlp := otlpReceiver(t)
+	e["NARAEN_OTLP_ENDPOINT"] = otlp.URL
 	e["NARAEN_SNAPSHOT_FILE"] = snapshotFile(t)
 	logs := serveUntilCancelled(t, e, iotest.ErrReader(errors.New("must not be used")))
 	if strings.Contains(logs, "development mode") {
@@ -226,12 +262,60 @@ func TestRunServesWithConfiguredKeyMaterial(t *testing.T) {
 	if !strings.Contains(logs, "datastore loaded from a snapshot file") {
 		t.Errorf("snapshot file outside dev mode not called out: %s", logs)
 	}
+	if m, l := otlp.count("/v1/metrics"), otlp.count("/v1/logs"); m == 0 || l == 0 {
+		t.Errorf("exported %d metrics and %d logs pushes, want both", m, l)
+	}
+	if strings.Contains(logs, "not exported") {
+		t.Errorf("export configured but reported missing: %s", logs)
+	}
+}
+
+// Without an endpoint the server still serves, and says nothing is exported.
+func TestRunWithoutExport(t *testing.T) {
+	e := prodEnv(t)
+	delete(e, "NARAEN_OTLP_ENDPOINT")
+	if logs := serveUntilCancelled(t, e, rand.Reader); !strings.Contains(logs, "metrics and logs are not exported") {
+		t.Errorf("missing export not reported: %s", logs)
+	}
+}
+
+// An exporter that cannot be built stops the server at startup: it would
+// otherwise run without the metrics its alerts depend on.
+func TestRunTelemetryError(t *testing.T) {
+	e := prodEnv(t)
+	// A CA certificate for a cleartext endpoint is a contradiction the
+	// exporter refuses.
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE", e["NARAEN_TLS_CERT_FILE"])
+	if err := run(context.Background(), env(e), rand.Reader, discard()); err == nil || !strings.Contains(err.Error(), "telemetry") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestFlushTelemetryReportsFailure(t *testing.T) {
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusBadRequest)
+	}))
+	defer broken.Close()
+	tel, err := telemetry.New(context.Background(), telemetry.Export{Endpoint: broken.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := tel.Meter.Meter("test").Int64Counter("test.count")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Add(context.Background(), 1)
+	var logs bytes.Buffer
+	flushTelemetry(tel, slog.New(slog.NewTextHandler(&logs, nil)))
+	if !strings.Contains(logs.String(), "telemetry flush failed") {
+		t.Fatalf("logs = %s", logs.String())
+	}
 }
 
 func TestRealMainFailureAndSuccess(t *testing.T) {
-	var stderr bytes.Buffer
-	if code := realMain(env(nil), &stderr); code != 1 || !strings.Contains(stderr.String(), "fatal") {
-		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	var stdout bytes.Buffer
+	if code := realMain(env(nil), &stdout); code != 1 || !strings.Contains(stdout.String(), "fatal") {
+		t.Fatalf("code = %d, stdout = %q", code, stdout.String())
 	}
 }
 

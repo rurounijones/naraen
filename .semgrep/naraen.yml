@@ -24,14 +24,16 @@ rules:
     # all covered. Two shapes count as a credential: an attribute key that
     # names one, and a value expression (not a string literal) that names one.
     # The message itself is not checked, so an event may be called "token
-    # issued" without a suppression.
+    # issued" without a suppression. The pattern cannot tell the message from
+    # a key, since both are a string followed by a value, so a key must look
+    # like one: no spaces. Messages are phrases and keys are identifiers.
     patterns:
       - pattern-either:
           - patterns:
               - pattern: $LOG.$LEVEL(..., "$KEY", $VAL, ...)
               - metavariable-regex:
                   metavariable: $KEY
-                  regex: '(?i)^(token|.*_token|bearer|authorization|.*url|.*href|.*signature|x-amz-.*|.*presign.*)$'
+                  regex: '(?i)^(token|[a-z0-9_.-]*_token|bearer|authorization|[a-z0-9_.-]*url|[a-z0-9_.-]*href|[a-z0-9_.-]*signature|x-amz-[a-z0-9-]*|[a-z0-9_.-]*presign[a-z0-9_.-]*)$'
           - patterns:
               - pattern: $LOG.$LEVEL(..., $VAL, ...)
               - metavariable-pattern:

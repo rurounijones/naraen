@@ -15,13 +15,18 @@ type config struct{ PublicURL string }
 
 type link struct{ URL string }
 
-func logging(ctx context.Context, log *slog.Logger, tok, presigned string, l link, cfg config, id, repoID string) {
+func logging(ctx context.Context, log *slog.Logger, tok, presigned string, l link, cfg config, id, repoID string, err error) {
 	// ok: naraen-log-presigned-url
 	log.InfoContext(ctx, "token issued", "token_id", id, "repo_id", repoID)
 	// ok: naraen-log-presigned-url
 	slog.Info("listening", "public_origin", cfg.PublicURL)
 	// ok: naraen-log-presigned-url
 	log.With("identity", id, "fingerprint", "SHA256:x").Info("ssh authenticated")
+	// A message that names what failed is not a key, even before a key/value pair.
+	// ok: naraen-log-presigned-url
+	log.ErrorContext(ctx, "presign failed", "request_id", id, "error", err)
+	// ok: naraen-log-presigned-url
+	log.Info("signed url refused", "repo_id", repoID)
 
 	// ruleid: naraen-log-presigned-url
 	log.InfoContext(ctx, "issued", "token", tok)

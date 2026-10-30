@@ -272,6 +272,21 @@ func (s *Snapshot) Identity(id string) (Identity, bool) {
 	return i, true
 }
 
+// KeyHolder returns the ID of the identity that holds fingerprint, active or
+// not. It is for audit records, which tell a removed member apart from a
+// stranger; access decisions use KeyOwner, which treats both as absent.
+func (s *Snapshot) KeyHolder(fingerprint string) (string, bool) {
+	k, ok := s.keys[fingerprint]
+	return k.IdentityID, ok
+}
+
+// Deactivated reports whether the identity exists but is inactive. Like
+// KeyHolder it is for audit records, never for access decisions.
+func (s *Snapshot) Deactivated(id string) bool {
+	i, ok := s.identities[id]
+	return ok && !i.Active
+}
+
 // RepoByPath resolves a canonical path or alias to a repo.
 func (s *Snapshot) RepoByPath(path string) (Repo, bool) {
 	id, ok := s.repoByPath[path]

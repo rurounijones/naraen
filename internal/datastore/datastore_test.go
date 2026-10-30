@@ -84,6 +84,15 @@ func TestSnapshotLookups(t *testing.T) {
 	if _, ok := s.KeyOwner(fp("unknown")); ok {
 		t.Error("unknown key must be absent")
 	}
+	if holder, ok := s.KeyHolder(fp("bob")); !ok || holder != "bob" {
+		t.Errorf("KeyHolder(bob) = %q, %v", holder, ok)
+	}
+	if holder, ok := s.KeyHolder(fp("unknown")); ok || holder != "" {
+		t.Errorf("KeyHolder(unknown) = %q, %v", holder, ok)
+	}
+	if !s.Deactivated("bob") || s.Deactivated("alice") || s.Deactivated("ghost") {
+		t.Error("Deactivated must hold only for an existing inactive identity")
+	}
 	if _, ok := s.Identity("bob"); ok {
 		t.Error("inactive identity must be absent")
 	}

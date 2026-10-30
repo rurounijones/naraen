@@ -15,12 +15,14 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 // Permission extension keys set by the key callback.
 const (
-	extIdentityID  = "identity-id"
-	extFingerprint = "key-fingerprint"
+	extIdentityID   = "identity-id"
+	extIdentityKind = "identity-kind"
+	extFingerprint  = "key-fingerprint"
 )
 
 const handshakeTimeout = 10 * time.Second
@@ -89,6 +91,16 @@ func NewServerConfig(hostKey ssh.Signer, a *authz.Authorizer) *ssh.ServerConfig 
 	return cfg
 }
 
+// keyRefusedError records why the key callback refused a key, for the
+// server's own audit record. x/crypto never sends callback errors to the
+// client, which learns only that the key was not accepted.
+type keyRefusedError struct {
+	fingerprint string
+	reason      authz.Reason
+}
+
+func (e *keyRefusedError) Error() string { return "unauthorized" }
+
 // KeyCallback returns a PublicKeyCallback that accepts a key only if its
 // fingerprint maps to an active identity. Failures reveal nothing.
 func KeyCallback(a *authz.Authorizer) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
@@ -96,23 +108,51 @@ func KeyCallback(a *authz.Authorizer) func(ssh.ConnMetadata, ssh.PublicKey) (*ss
 		fp := ssh.FingerprintSHA256(key)
 		id, err := a.IdentityForKey(fp)
 		if err != nil {
-			return nil, errors.New("unauthorized")
+			return nil, &keyRefusedError{fingerprint: fp, reason: authz.ReasonOf(err)}
 		}
 		return &ssh.Permissions{Extensions: map[string]string{
-			extIdentityID:  id.ID,
-			extFingerprint: fp,
+			extIdentityID:   id.ID,
+			extIdentityKind: string(id.Kind),
+			extFingerprint:  fp,
 		}}, nil
 	}
 }
 
+// refusedKey returns the last key refusal behind a failed handshake. A client
+// offers its keys in turn, so the last one refused is the one it gave up on.
+// It reports false for handshakes that failed for any other reason, such as a
+// scanner disconnecting during key exchange.
+func refusedKey(err error) (*keyRefusedError, bool) {
+	var auth *ssh.ServerAuthError
+	if !errors.As(err, &auth) {
+		return nil, false
+	}
+	for i := len(auth.Errors) - 1; i >= 0; i-- {
+		var refused *keyRefusedError
+		if errors.As(auth.Errors[i], &refused) {
+			return refused, true
+		}
+	}
+	return nil, false
+}
+
+// Session describes the authenticated connection a command arrived on.
+type Session struct {
+	IdentityID   string
+	IdentityKind string
+	// Log carries the identity, its kind, the key fingerprint and the remote
+	// address on every record, so each audit line stands alone.
+	Log *slog.Logger
+}
+
 // Handler runs an authenticated, parsed command and returns what to print.
 type Handler interface {
-	Handle(ctx context.Context, identityID string, cmd Command) (stdout []byte, err error)
+	Handle(ctx context.Context, s Session, cmd Command) (stdout []byte, err error)
 }
 
 // Serve accepts connections on ln until ctx is cancelled. It returns an error
 // only if the listener is closed out from under it.
-func Serve(ctx context.Context, ln net.Listener, cfg *ssh.ServerConfig, lim Limits, h Handler, log *slog.Logger) error {
+func Serve(ctx context.Context, ln net.Listener, cfg *ssh.ServerConfig, lim Limits, h Handler, rec *telemetry.Recorder, log *slog.Logger) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -140,19 +180,23 @@ func Serve(ctx context.Context, ln net.Listener, cfg *ssh.ServerConfig, lim Limi
 		}
 		backoff = lim.AcceptBackoff
 		src := sourceOf(conn.RemoteAddr())
+		// Limit hits are logged at debug only: a flood would otherwise flood
+		// the log too. The metric shows the volume and drives alerts.
 		if !rates.allow(src) {
 			log.DebugContext(ctx, "ssh connection rate limit reached", "remote", src)
+			rec.ConnectionRejected(ctx, "rate")
 			_ = conn.Close()
 			continue
 		}
 		if !conns.acquire(src) {
 			log.DebugContext(ctx, "ssh connection limit reached", "remote", src)
+			rec.ConnectionRejected(ctx, "concurrency")
 			_ = conn.Close()
 			continue
 		}
 		go func() {
 			defer conns.release(src)
-			serveConn(ctx, conn, cfg, lim, h, log)
+			serveConn(ctx, conn, cfg, lim, h, rec, log)
 		}()
 	}
 }
@@ -268,12 +312,19 @@ func (l *connLimiter) release(src string) {
 	}
 }
 
-func serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, lim Limits, h Handler, log *slog.Logger) {
+func serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, lim Limits, h Handler, rec *telemetry.Recorder, log *slog.Logger) {
 	defer nc.Close()
 	_ = nc.SetDeadline(time.Now().Add(handshakeTimeout))
+	remote := nc.RemoteAddr().String()
 	conn, chans, reqs, err := ssh.NewServerConn(nc, cfg)
 	if err != nil {
-		log.DebugContext(ctx, "ssh handshake failed", "remote", nc.RemoteAddr())
+		if refused, ok := refusedKey(err); ok {
+			log.InfoContext(ctx, "ssh authentication failed", "remote", remote,
+				"fingerprint", refused.fingerprint, "reason", string(refused.reason))
+			rec.AuthFailure(ctx, string(refused.reason), telemetry.IdentityTypeUnknown)
+			return
+		}
+		log.DebugContext(ctx, "ssh handshake failed", "remote", remote)
 		return
 	}
 	// The deadline bounds the whole connection, so an authenticated client
@@ -283,14 +334,23 @@ func serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, lim Limi
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 
+	ext := conn.Permissions.Extensions
+	s := Session{
+		IdentityID:   ext[extIdentityID],
+		IdentityKind: ext[extIdentityKind],
+		Log: log.With("identity", ext[extIdentityID], "identity_type", ext[extIdentityKind],
+			"fingerprint", ext[extFingerprint], "remote", remote),
+	}
+	s.Log.InfoContext(ctx, "ssh authenticated")
+
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	serveChannels(ctx, chans, lim.MaxSessions, conn.Permissions.Extensions[extIdentityID], h, log)
+	serveChannels(ctx, chans, lim.MaxSessions, s, h, rec)
 }
 
 // serveChannels handles up to maxSessions session channels and rejects every
 // other type.
-func serveChannels(ctx context.Context, chans <-chan ssh.NewChannel, maxSessions int, id string, h Handler, log *slog.Logger) {
+func serveChannels(ctx context.Context, chans <-chan ssh.NewChannel, maxSessions int, s Session, h Handler, rec *telemetry.Recorder) {
 	sessions := 0
 	for nch := range chans {
 		if nch.ChannelType() != "session" {
@@ -306,11 +366,18 @@ func serveChannels(ctx context.Context, chans <-chan ssh.NewChannel, maxSessions
 			return
 		}
 		sessions++
-		go serveSession(ctx, ch, creqs, id, h, log)
+		go serveSession(ctx, ch, creqs, s, h, rec)
 	}
 }
 
-func serveSession(ctx context.Context, ch ssh.Channel, reqs <-chan *ssh.Request, id string, h Handler, log *slog.Logger) {
+// reasonBadCommand labels exec payloads that do not parse. Path tricks such as
+// ".." or encoded slashes land here, because the command parser normalizes
+// the path, so the count is worth watching.
+const reasonBadCommand = "bad_command"
+
+// serveSession runs one exec request. Whatever goes wrong, the client hears
+// only "request refused"; the reason goes to the log and the metrics.
+func serveSession(ctx context.Context, ch ssh.Channel, reqs <-chan *ssh.Request, s Session, h Handler, rec *telemetry.Recorder) {
 	defer ch.Close()
 	for req := range reqs {
 		if req.Type != "exec" {
@@ -320,19 +387,31 @@ func serveSession(ctx context.Context, ch ssh.Channel, reqs <-chan *ssh.Request,
 		raw, ok := parseExecPayload(req.Payload)
 		cmd, err := ParseCommand(raw)
 		if !ok || err != nil {
+			// The raw command is client input of any size and content, so
+			// it is not logged.
+			s.Log.InfoContext(ctx, "command refused", "reason", reasonBadCommand)
+			rec.AuthFailure(ctx, reasonBadCommand, s.IdentityKind)
 			_ = req.Reply(false, nil)
 			exit(ch, 1)
 			return
 		}
 		_ = req.Reply(true, nil)
-		out, err := h.Handle(ctx, id, cmd)
+		out, err := h.Handle(ctx, s, cmd)
 		if errors.Is(err, ErrUnsupported) {
+			s.Log.InfoContext(ctx, "command unsupported", "command", cmd.Name, "repo", cmd.Repo, "operation", string(cmd.Op))
 			_, _ = io.WriteString(ch.Stderr(), "error: "+ErrUnsupported.Error()+"\n")
 			exit(ch, 1)
 			return
 		}
 		if err != nil {
-			log.InfoContext(ctx, "command refused", "identity", id, "command", cmd.Name)
+			if reason := authz.ReasonOf(err); reason != "" {
+				s.Log.InfoContext(ctx, "command refused", "command", cmd.Name, "repo", cmd.Repo,
+					"operation", string(cmd.Op), "reason", string(reason))
+				rec.AuthFailure(ctx, string(reason), s.IdentityKind)
+			} else {
+				s.Log.ErrorContext(ctx, "command failed", "command", cmd.Name, "repo", cmd.Repo,
+					"operation", string(cmd.Op), "error", err)
+			}
 			_, _ = io.WriteString(ch.Stderr(), "error: request refused\n")
 			exit(ch, 1)
 			return

@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+	"time"
 
 	"github.com/rurounijones/naraen/internal/authz"
+	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/token"
 )
 
@@ -22,13 +23,13 @@ type Authenticator struct {
 	authz  *authz.Authorizer
 	tokens *token.Signer
 	base   string
-	log    *slog.Logger
+	rec    *telemetry.Recorder
 }
 
 // NewAuthenticator returns an Authenticator whose hrefs start with base, the
 // public HTTPS origin.
-func NewAuthenticator(a *authz.Authorizer, tokens *token.Signer, base string, log *slog.Logger) *Authenticator {
-	return &Authenticator{authz: a, tokens: tokens, base: base, log: log}
+func NewAuthenticator(a *authz.Authorizer, tokens *token.Signer, base string, rec *telemetry.Recorder) *Authenticator {
+	return &Authenticator{authz: a, tokens: tokens, base: base, rec: rec}
 }
 
 // authResponse is what git-lfs expects from git-lfs-authenticate.
@@ -40,15 +41,15 @@ type authResponse struct {
 
 // Handle implements Handler. It returns ErrUnsupported, a denial from authz
 // (which says nothing about why), or an error minting the token.
-func (a *Authenticator) Handle(ctx context.Context, identityID string, cmd Command) ([]byte, error) {
+func (a *Authenticator) Handle(ctx context.Context, s Session, cmd Command) ([]byte, error) {
 	if cmd.Name != CmdAuthenticate {
 		return nil, ErrUnsupported
 	}
-	repoID, err := a.authz.Authorize(identityID, cmd.Repo, cmd.Op)
+	repoID, err := a.authz.Authorize(s.IdentityID, cmd.Repo, cmd.Op)
 	if err != nil {
 		return nil, err
 	}
-	tok, claims, err := a.tokens.Mint(identityID, repoID, cmd.Op)
+	tok, claims, err := a.tokens.Mint(s.IdentityID, repoID, cmd.Op)
 	if err != nil {
 		return nil, err
 	}
@@ -60,8 +61,10 @@ func (a *Authenticator) Handle(ctx context.Context, identityID string, cmd Comma
 		Header:    map[string]string{"Authorization": "Bearer " + tok},
 		ExpiresIn: int64(a.tokens.TTL().Seconds()),
 	})
-	// An audit record of the decision. The token ID is not a credential;
+	// The audit record of the decision. The token ID is not a credential;
 	// the token itself and the href are never logged.
-	a.log.InfoContext(ctx, "token issued", "identity", identityID, "token_id", claims.ID, "repo_id", repoID, "operation", cmd.Op)
+	s.Log.InfoContext(ctx, "token issued", "token_id", claims.ID, "repo", cmd.Repo, "repo_id", repoID,
+		"operation", string(cmd.Op), "expires", time.Unix(claims.Expires, 0).UTC())
+	a.rec.TokenIssued(ctx, string(cmd.Op), repoID, s.IdentityID)
 	return append(out, '\n'), nil
 }

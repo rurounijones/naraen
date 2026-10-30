@@ -74,6 +74,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	otel.SetErrorHandler(telemetry.ErrorHandler(local))
 	defer flushTelemetry(tel, local)
 	log = slog.New(tel.LogHandler(local.Handler()))
+	rec := telemetry.NewRecorder(tel.Meter)
 	if cfg.OTLPEndpoint == "" {
 		log.WarnContext(ctx, "metrics and logs are not exported: NARAEN_OTLP_ENDPOINT is not set")
 	}
@@ -113,12 +114,12 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	}
 	authorizer := authz.New(store)
 	sshCfg := sshd.NewServerConfig(hostKey, authorizer)
-	authenticate := sshd.NewAuthenticator(authorizer, tokens, cfg.PublicURL, log)
+	authenticate := sshd.NewAuthenticator(authorizer, tokens, cfg.PublicURL, rec)
 
 	// Both servers report here when they stop; ErrServerClosed and a nil
 	// Serve result are the normal shutdown outcomes and are filtered below.
 	errc := make(chan error, 2)
-	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), authenticate, log) }()
+	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), authenticate, rec, log) }()
 	go func() { errc <- httpSrv.ListenAndServeTLS("", "") }()
 	log.InfoContext(ctx, "listening", "version", version, "ssh", cfg.SSHAddr, "https", cfg.HTTPSAddr, "public_origin", cfg.PublicURL)
 

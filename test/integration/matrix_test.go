@@ -15,8 +15,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -68,6 +71,9 @@ func (id identity) mayUpload() bool {
 // env is the running server and the per-identity client material.
 type env struct {
 	dir        string
+	logs       *syncBuffer
+	otlp       *otlpReceiver
+	stop       func() // stops the server with SIGTERM and waits for it
 	sshPort    int
 	publicURL  string
 	knownHosts string
@@ -116,6 +122,60 @@ func TestTransferUnsupported(t *testing.T) {
 	}
 }
 
+// The audit events reach the telemetry backend from the real binary: a token
+// issued, a refused request and a refused key each arrive over OTLP as
+// metrics with the labels the alerts use, and as log records, both over OTLP
+// and on stdout. The issue's log record names the token by its ID.
+func TestAuditEventsExported(t *testing.T) {
+	needSSH(t)
+	e := startServer(t)
+	out, err := e.ssh(t, "writer", auditSource, "git-lfs-authenticate acme/assets upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := e.checkToken(t, out, "writer", lfs.Upload)
+	_, err = e.ssh(t, "reader", auditSource, "git-lfs-authenticate acme/assets upload")
+	checkDenied(t, err)
+	_, err = e.ssh(t, "unknown-key", auditSource, "git-lfs-authenticate acme/assets download")
+	checkDenied(t, err)
+
+	// Shutdown flushes whatever the last export interval had not sent.
+	e.stop()
+	got := e.otlp.counters(t)
+	for point, want := range map[string]int64{
+		"lfs.tokens.issued{operation=upload,repo=1,user=writer}":            1,
+		"lfs.auth.failures{identity_type=person,reason=insufficient_grant}": 1,
+		"lfs.auth.failures{identity_type=unknown,reason=unknown_key}":       1,
+	} {
+		if got[point] != want {
+			t.Errorf("%s = %d, want %d (exported: %v)", point, got[point], want, got)
+		}
+	}
+	logs := e.logs.String()
+	for _, want := range []string{`"msg":"token issued"`, `"token_id":"` + claims.ID + `"`, `"msg":"ssh authentication failed"`, `"reason":"insufficient_grant"`} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("server log lacks %s", want)
+		}
+	}
+	exported := e.otlp.records()
+	for _, want := range []map[string]string{
+		{"msg": "token issued", "level": "INFO", "token_id": claims.ID, "identity": "writer", "operation": "upload"},
+		{"msg": "command refused", "identity": "reader", "reason": "insufficient_grant"},
+		{"msg": "ssh authentication failed", "reason": "unknown_key"},
+	} {
+		if !slices.ContainsFunc(exported, func(rec map[string]string) bool {
+			for k, v := range want {
+				if rec[k] != v {
+					return false
+				}
+			}
+			return true
+		}) {
+			t.Errorf("no exported log record matches %v (exported: %v)", want, exported)
+		}
+	}
+}
+
 func needSSH(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("ssh"); err != nil {
@@ -128,7 +188,10 @@ func needSSH(t *testing.T) {
 // limit applies at its production defaults without one identity's
 // connections counting against the next. Linux routes all of 127.0.0.0/8 to
 // the loopback interface.
-const transferSource = "127.0.0.2"
+const (
+	transferSource = "127.0.0.2"
+	auditSource    = "127.0.0.4"
+)
 
 func sourceFor(i int) string { return fmt.Sprintf("127.0.0.%d", 10+i) }
 
@@ -154,7 +217,8 @@ func checkDenied(t *testing.T, err error) {
 // checkToken asserts an allowed cell's git-lfs-authenticate response: the
 // Batch API address for the repo, a bearer token that verifies for exactly
 // this identity, repo ID and operation, and the token's 15 minute lifetime.
-func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation) {
+// It returns the token's claims.
+func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation) token.Claims {
 	t.Helper()
 	var resp struct {
 		Href      string            `json:"href"`
@@ -175,6 +239,7 @@ func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation) {
 	if err != nil || c.Subject != as {
 		t.Errorf("token claims = %+v, %v", c, err)
 	}
+	return c
 }
 
 func freePort(t *testing.T) int {
@@ -287,10 +352,11 @@ func startServer(t *testing.T) *env {
 	hostLine := fmt.Sprintf("[127.0.0.1]:%d %s", e.sshPort, ssh.MarshalAuthorizedKey(hostSigner.PublicKey()))
 	e.knownHosts = writeFile(t, filepath.Join(e.dir, "known_hosts"), []byte(hostLine))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	srv := exec.CommandContext(ctx, bin)
+	e.otlp = newOTLPReceiver(t)
+	srv := exec.Command(bin)
 	// Every piece of key material is configured, so this is not dev mode.
 	srv.Env = []string{
+		"NARAEN_OTLP_ENDPOINT=" + e.otlp.URL,
 		"NARAEN_SSH_ADDR=" + fmt.Sprintf("127.0.0.1:%d", e.sshPort),
 		"NARAEN_HTTPS_ADDR=" + fmt.Sprintf("127.0.0.1:%d", httpsPort),
 		"NARAEN_PUBLIC_URL=" + e.publicURL,
@@ -300,14 +366,35 @@ func startServer(t *testing.T) *env {
 		"NARAEN_TLS_CERT_FILE=" + tlsCert,
 		"NARAEN_TLS_KEY_FILE=" + tlsKey,
 	}
-	logs := &strings.Builder{}
+	logs := &syncBuffer{}
+	e.logs = logs
 	srv.Stdout, srv.Stderr = logs, logs
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
+	var once sync.Once
+	e.stop = func() {
+		// SIGTERM, as an orchestrator stops it, so the server flushes its
+		// metrics; a clean exit is part of what is tested.
+		once.Do(func() {
+			if err := srv.Process.Signal(syscall.SIGTERM); err != nil {
+				t.Errorf("stop server: %v", err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- srv.Wait() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("server did not stop cleanly: %v", err)
+				}
+			case <-time.After(20 * time.Second):
+				_ = srv.Process.Kill()
+				t.Errorf("server did not stop within 20s")
+			}
+		})
+	}
 	t.Cleanup(func() {
-		cancel()
-		_ = srv.Wait()
+		e.stop()
 		if t.Failed() {
 			t.Logf("server log:\n%s", logs.String())
 		}

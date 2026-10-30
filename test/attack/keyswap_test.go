@@ -14,11 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/sshd"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 // CVE-2024-45337: x/crypto may invoke PublicKeyCallback for keys a client
@@ -94,8 +96,8 @@ func (f *fixture) acceptedIDs() []string {
 // to it, which is the identity a real handler would act as.
 type identityHandler struct{}
 
-func (identityHandler) Handle(_ context.Context, id string, _ sshd.Command) ([]byte, error) {
-	return []byte(id), nil
+func (identityHandler) Handle(_ context.Context, s sshd.Session, _ sshd.Command) ([]byte, error) {
+	return []byte(s.IdentityID), nil
 }
 
 var reportIdentity sshd.Handler = identityHandler{}
@@ -142,7 +144,7 @@ func start(t *testing.T) *fixture {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = sshd.Serve(ctx, ln, cfg, sshd.DefaultLimits, reportIdentity, slog.New(slog.DiscardHandler))
+		_ = sshd.Serve(ctx, ln, cfg, sshd.DefaultLimits, reportIdentity, telemetry.NewRecorder(noop.NewMeterProvider()), slog.New(slog.DiscardHandler))
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 	return f

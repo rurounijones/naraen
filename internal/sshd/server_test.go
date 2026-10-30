@@ -11,21 +11,24 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
+	"github.com/rurounijones/naraen/internal/lfs"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 type recordingHandler struct {
-	gotID  string
+	got    Session
 	gotCmd Command
 	out    []byte
 	err    error
 }
 
-func (h *recordingHandler) Handle(_ context.Context, id string, c Command) ([]byte, error) {
-	h.gotID, h.gotCmd = id, c
+func (h *recordingHandler) Handle(_ context.Context, s Session, c Command) ([]byte, error) {
+	h.got, h.gotCmd = s, c
 	return h.out, h.err
 }
 
@@ -62,17 +65,27 @@ func storeKnowing(t *testing.T, known ssh.Signer) *datastore.Store {
 	return st
 }
 
-// start runs a server with DefaultLimits whose datastore knows only the given
-// client signer.
-func start(t *testing.T, known ssh.Signer, h Handler) (addr string, hostPub ssh.PublicKey) {
+func startWith(t *testing.T, known ssh.Signer, h Handler, lim Limits) (addr string, hostPub ssh.PublicKey) {
 	t.Helper()
-	return startWith(t, known, h, DefaultLimits)
+	o := startObserved(t, known, h, lim)
+	return o.addr, o.hostPub
 }
 
-func startWith(t *testing.T, known ssh.Signer, h Handler, lim Limits) (addr string, hostPub ssh.PublicKey) {
+// observed is a running server whose log records and metrics a test can read.
+type observed struct {
+	addr    string
+	hostPub ssh.PublicKey
+	logs    *syncBuffer
+	metrics *sdkmetric.ManualReader
+}
+
+func startObserved(t *testing.T, known ssh.Signer, h Handler, lim Limits) *observed {
 	t.Helper()
 	host := newSigner(t)
 	cfg := NewServerConfig(host, authz.New(storeKnowing(t, known)))
+	o := &observed{hostPub: host.PublicKey(), logs: &syncBuffer{}, metrics: sdkmetric.NewManualReader()}
+	log := slog.New(slog.NewJSONHandler(o.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rec := telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(o.metrics)))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -80,14 +93,15 @@ func startWith(t *testing.T, known ssh.Signer, h Handler, lim Limits) (addr stri
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, cfg, lim, h, quiet()) }()
+	go func() { done <- Serve(ctx, ln, cfg, lim, h, rec, log) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Errorf("Serve: %v", err)
 		}
 	})
-	return ln.Addr().String(), host.PublicKey()
+	o.addr = ln.Addr().String()
+	return o
 }
 
 // dial bounds the whole handshake, not just the TCP connect, so a server that
@@ -125,9 +139,9 @@ func run(c *ssh.Client, cmd string) (string, error) {
 func TestServeKnownKeyRunsCommand(t *testing.T) {
 	alice := newSigner(t)
 	h := &recordingHandler{out: []byte(`{"href":"x"}`)}
-	addr, hostPub := start(t, alice, h)
+	o := startObserved(t, alice, h, DefaultLimits)
 
-	c, err := dial(addr, hostPub, alice)
+	c, err := dial(o.addr, o.hostPub, alice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,16 +151,26 @@ func TestServeKnownKeyRunsCommand(t *testing.T) {
 	if err != nil || out != `{"href":"x"}` {
 		t.Fatalf("out = %q, err = %v", out, err)
 	}
-	if h.gotID != "alice" || h.gotCmd.Repo != "acme/assets" || h.gotCmd.Name != CmdAuthenticate {
-		t.Errorf("handler saw %q %+v", h.gotID, h.gotCmd)
+	if h.got.IdentityID != "alice" || h.got.IdentityKind != "person" || h.gotCmd.Repo != "acme/assets" || h.gotCmd.Name != CmdAuthenticate {
+		t.Errorf("handler saw %+v %+v", h.got, h.gotCmd)
+	}
+	// The session's logger puts the connection on every record.
+	r := o.logs.record(t, "ssh authenticated")
+	checkFields(t, r, map[string]string{
+		"identity":      "alice",
+		"identity_type": "person",
+		"fingerprint":   ssh.FingerprintSHA256(alice.PublicKey()),
+	})
+	if remote, _ := r["remote"].(string); !strings.HasPrefix(remote, "127.0.0.1:") {
+		t.Errorf("remote = %v", r["remote"])
 	}
 }
 
 func TestServeRefusals(t *testing.T) {
 	alice := newSigner(t)
 	h := &recordingHandler{err: errors.New("nope")}
-	addr, hostPub := start(t, alice, h)
-	c, err := dial(addr, hostPub, alice)
+	o := startObserved(t, alice, h, DefaultLimits)
+	c, err := dial(o.addr, o.hostPub, alice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +182,14 @@ func TestServeRefusals(t *testing.T) {
 	if _, err := run(c, "ls -la"); err == nil {
 		t.Error("unparseable command must be refused")
 	}
+	// A command that does not parse, such as a path trick, is counted and
+	// logged without echoing the client's input.
+	r := o.logs.record(t, "command refused")
+	checkFields(t, r, map[string]string{"reason": "bad_command", "identity": "alice"})
+	if strings.Contains(o.logs.String(), "ls -la") {
+		t.Error("raw command logged")
+	}
+	waitCount(t, o.metrics, telemetry.MetricAuthFailures, "identity_type=person,reason=bad_command", 1)
 	sess, err := c.NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -183,48 +215,121 @@ func stderrOf(t *testing.T, c *ssh.Client, cmd string) (string, error) {
 }
 
 // A refusal names no reason, but git-lfs-transfer being unsupported is not a
-// refusal of access and is said plainly, so git-lfs falls back at once.
+// refusal of access and is said plainly, so git-lfs falls back at once. The
+// server's own record says what happened in each case.
 func TestServeReportsUnsupportedAndRefusedDifferently(t *testing.T) {
 	alice := newSigner(t)
-	for handlerErr, want := range map[error]string{
-		ErrUnsupported:       "error: git-lfs-transfer is not supported\n",
-		authz.ErrDenied:      "error: request refused\n",
-		errors.New("secret"): "error: request refused\n",
+	// A real denial, carrying the reason only the server sees.
+	_, denied := authz.New(datastore.NewStore(time.Hour, datastore.DefaultLimits)).Authorize("alice", "acme/assets", lfs.Upload)
+	for _, tt := range []struct {
+		err    error
+		stderr string
+		record string
+		fields map[string]string
+		metric string // auth.failures point that must reach 1, "" for none
+	}{
+		{
+			ErrUnsupported, "error: git-lfs-transfer is not supported\n", "command unsupported",
+			map[string]string{"command": CmdTransfer, "repo": "acme/assets", "operation": "upload"},
+			"",
+		},
+		{
+			denied, "error: request refused\n", "command refused",
+			map[string]string{"command": CmdTransfer, "repo": "acme/assets", "operation": "upload", "reason": "not_ready"},
+			"identity_type=person,reason=not_ready",
+		},
+		{
+			errors.New("secret"), "error: request refused\n", "command failed",
+			map[string]string{"command": CmdTransfer, "error": "secret", "level": "ERROR"},
+			"",
+		},
 	} {
-		addr, hostPub := start(t, alice, &recordingHandler{err: handlerErr})
-		c, err := dial(addr, hostPub, alice)
+		o := startObserved(t, alice, &recordingHandler{err: tt.err}, DefaultLimits)
+		c, err := dial(o.addr, o.hostPub, alice)
 		if err != nil {
 			t.Fatal(err)
 		}
 		stderr, err := stderrOf(t, c, "git-lfs-transfer acme/assets upload")
 		c.Close()
 		var exitErr *ssh.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 1 || stderr != want {
-			t.Errorf("%v: stderr = %q, err = %v", handlerErr, stderr, err)
+		if !errors.As(err, &exitErr) || exitErr.ExitStatus() != 1 || stderr != tt.stderr {
+			t.Errorf("%v: stderr = %q, err = %v", tt.err, stderr, err)
 		}
+		r := o.logs.record(t, tt.record)
+		checkFields(t, r, tt.fields)
+		checkFields(t, r, map[string]string{"identity": "alice"})
+		if tt.metric == "" {
+			if got := counts(t, o.metrics, telemetry.MetricAuthFailures); len(got) != 0 {
+				t.Errorf("%v: counted as an auth failure: %v", tt.err, got)
+			}
+			continue
+		}
+		waitCount(t, o.metrics, telemetry.MetricAuthFailures, tt.metric, 1)
 	}
 }
 
+// An unknown key is refused without telling the client why, and the server
+// records which key was offered from where.
 func TestServeRejectsUnknownKey(t *testing.T) {
 	alice, mallory := newSigner(t), newSigner(t)
-	addr, hostPub := start(t, alice, &recordingHandler{})
-	if c, err := dial(addr, hostPub, mallory); err == nil {
+	o := startObserved(t, alice, &recordingHandler{}, DefaultLimits)
+	if c, err := dial(o.addr, o.hostPub, mallory); err == nil {
 		c.Close()
 		t.Fatal("unknown key authenticated")
 	}
+	r := o.logs.record(t, "ssh authentication failed")
+	checkFields(t, r, map[string]string{"reason": "unknown_key", "fingerprint": ssh.FingerprintSHA256(mallory.PublicKey())})
+	if remote, _ := r["remote"].(string); !strings.HasPrefix(remote, "127.0.0.1:") {
+		t.Errorf("remote = %v", r["remote"])
+	}
+	waitCount(t, o.metrics, telemetry.MetricAuthFailures, "identity_type=unknown,reason=unknown_key", 1)
 }
 
+// A handshake that fails without any key being refused, here a password
+// attempt, is not an authentication failure: scanners do this all day.
 func TestServeRejectsPasswordAuth(t *testing.T) {
 	alice := newSigner(t)
-	addr, hostPub := start(t, alice, &recordingHandler{})
-	_, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+	o := startObserved(t, alice, &recordingHandler{}, DefaultLimits)
+	_, err := ssh.Dial("tcp", o.addr, &ssh.ClientConfig{
 		User:            "git",
 		Auth:            []ssh.AuthMethod{ssh.Password("hunter2")},
-		HostKeyCallback: ssh.FixedHostKey(hostPub),
+		HostKeyCallback: ssh.FixedHostKey(o.hostPub),
 		Timeout:         5 * time.Second,
 	})
 	if err == nil {
 		t.Fatal("password auth succeeded")
+	}
+	checkFields(t, o.logs.record(t, "ssh handshake failed"), map[string]string{"level": "DEBUG"})
+	if got := counts(t, o.metrics, telemetry.MetricAuthFailures); len(got) != 0 {
+		t.Errorf("counted as an auth failure: %v", got)
+	}
+	if strings.Contains(o.logs.String(), "hunter2") {
+		t.Error("password logged")
+	}
+}
+
+func TestRefusedKey(t *testing.T) {
+	first := &keyRefusedError{fingerprint: "SHA256:first", reason: authz.ReasonUnknownKey}
+	last := &keyRefusedError{fingerprint: "SHA256:last", reason: authz.ReasonInactiveIdentity}
+	got, ok := refusedKey(&ssh.ServerAuthError{Errors: []error{ssh.ErrNoAuth, first, last, errors.New("later failure")}})
+	if !ok || got != last {
+		t.Errorf("refusedKey = %+v, %v; want the last refusal", got, ok)
+	}
+	// The search reaches the first entry too.
+	if got, ok := refusedKey(&ssh.ServerAuthError{Errors: []error{first, ssh.ErrNoAuth}}); !ok || got != first {
+		t.Errorf("refusedKey = %+v, %v; want the only refusal", got, ok)
+	}
+	for name, err := range map[string]error{
+		"no key offered": &ssh.ServerAuthError{Errors: []error{ssh.ErrNoAuth}},
+		"not auth":       errors.New("connection reset"),
+		"nil":            nil,
+	} {
+		if got, ok := refusedKey(err); ok || got != nil {
+			t.Errorf("%s: refusedKey = %+v, %v", name, got, ok)
+		}
+	}
+	if first.Error() != "unauthorized" {
+		t.Errorf("Error() = %q", first.Error())
 	}
 }
 
@@ -232,7 +337,8 @@ func TestServeLimitsConnectionsPerSource(t *testing.T) {
 	alice := newSigner(t)
 	lim := DefaultLimits
 	lim.MaxConnsPerSource = 1
-	addr, hostPub := startWith(t, alice, &recordingHandler{}, lim)
+	o := startObserved(t, alice, &recordingHandler{}, lim)
+	addr, hostPub := o.addr, o.hostPub
 	first, err := dial(addr, hostPub, alice)
 	if err != nil {
 		t.Fatal(err)
@@ -241,6 +347,7 @@ func TestServeLimitsConnectionsPerSource(t *testing.T) {
 		c.Close()
 		t.Fatal("second connection from the same source accepted")
 	}
+	waitCount(t, o.metrics, telemetry.MetricSSHConnsRejected, "reason=concurrency", 1)
 	first.Close()
 	// The slot is released once the first connection ends.
 	deadline := time.Now().Add(5 * time.Second)
@@ -327,11 +434,20 @@ func TestKeyCallbackCarriesIdentityOfAuthenticatingKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perms.Extensions[extIdentityID] != "alice" || perms.Extensions[extFingerprint] != ssh.FingerprintSHA256(alice.PublicKey()) {
+	if perms.Extensions[extIdentityID] != "alice" || perms.Extensions[extIdentityKind] != "person" ||
+		perms.Extensions[extFingerprint] != ssh.FingerprintSHA256(alice.PublicKey()) {
 		t.Errorf("extensions = %v", perms.Extensions)
 	}
-	if _, err := cb(nil, newSigner(t).PublicKey()); err == nil {
-		t.Error("unknown key accepted")
+	stranger := newSigner(t).PublicKey()
+	_, err = cb(nil, stranger)
+	var refused *keyRefusedError
+	if !errors.As(err, &refused) || refused.reason != authz.ReasonUnknownKey || refused.fingerprint != ssh.FingerprintSHA256(stranger) {
+		t.Errorf("unknown key: %v (%+v)", err, refused)
+	}
+	// The reason comes from authz, so a store that is not ready says so.
+	_, err = KeyCallback(authz.New(datastore.NewStore(time.Hour, datastore.DefaultLimits)))(nil, alice.PublicKey())
+	if !errors.As(err, &refused) || refused.reason != authz.ReasonNotReady {
+		t.Errorf("not ready: %v (%+v)", err, refused)
 	}
 }
 
@@ -381,7 +497,7 @@ func TestServeChannelsRejectsNonSession(t *testing.T) {
 	other := &fakeChannel{typ: "direct-tcpip"}
 	chans <- other
 	close(chans)
-	serveChannels(context.Background(), chans, 1, "id", &recordingHandler{}, quiet())
+	serveChannels(context.Background(), chans, 1, Session{Log: quiet()}, &recordingHandler{}, noRec())
 	if !other.rejected || other.reason != ssh.UnknownChannelType {
 		t.Fatal("non-session channel was not rejected")
 	}
@@ -394,7 +510,7 @@ func TestServeChannelsStopsOnAcceptError(t *testing.T) {
 	chans <- bad
 	chans <- later
 	close(chans)
-	serveChannels(context.Background(), chans, 1, "id", &recordingHandler{}, quiet())
+	serveChannels(context.Background(), chans, 1, Session{Log: quiet()}, &recordingHandler{}, noRec())
 	if later.rejected {
 		t.Fatal("channels after an accept error must not be processed")
 	}
@@ -405,7 +521,7 @@ func TestServeChannelsRejectsSessionsOverLimit(t *testing.T) {
 	over := &fakeChannel{typ: "session", acceptEr: errors.New("must not be accepted")}
 	chans <- over
 	close(chans)
-	serveChannels(context.Background(), chans, 0, "id", &recordingHandler{}, quiet())
+	serveChannels(context.Background(), chans, 0, Session{Log: quiet()}, &recordingHandler{}, noRec())
 	if !over.rejected || over.reason != ssh.ResourceShortage {
 		t.Fatal("session over the limit was not rejected")
 	}
@@ -433,7 +549,7 @@ func TestServeRetriesTransientAcceptErrors(t *testing.T) {
 	ln := &flakyListener{failures: 3, calls: make(chan struct{}, 10)}
 	lim := DefaultLimits
 	lim.AcceptBackoff = time.Millisecond
-	err := Serve(context.Background(), ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, quiet())
+	err := Serve(context.Background(), ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, noRec(), quiet())
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("err = %v, want net.ErrClosed", err)
 	}
@@ -448,7 +564,7 @@ func TestServeStopsDuringBackoff(t *testing.T) {
 	lim.AcceptBackoff = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, quiet()) }()
+	go func() { done <- Serve(ctx, ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, noRec(), quiet()) }()
 	<-ln.calls
 	cancel()
 	select {
@@ -585,16 +701,20 @@ func TestServeLimitsConnectionRate(t *testing.T) {
 	lim := DefaultLimits
 	lim.ConnBurst = 1
 	lim.ConnInterval = time.Hour
-	addr, hostPub := startWith(t, alice, &recordingHandler{}, lim)
-	c, err := dial(addr, hostPub, alice)
+	o := startObserved(t, alice, &recordingHandler{}, lim)
+	c, err := dial(o.addr, o.hostPub, alice)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.Close()
 	// The first connection has ended, so only the rate can refuse this one.
-	if c, err := dial(addr, hostPub, alice); err == nil {
+	if c, err := dial(o.addr, o.hostPub, alice); err == nil {
 		c.Close()
 		t.Fatal("connection over the rate accepted")
+	}
+	waitCount(t, o.metrics, telemetry.MetricSSHConnsRejected, "reason=rate", 1)
+	if got := counts(t, o.metrics, telemetry.MetricSSHConnsRejected); len(got) != 1 {
+		t.Errorf("rejections = %v, want only the rate", got)
 	}
 }
 

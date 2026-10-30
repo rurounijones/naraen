@@ -300,11 +300,7 @@ func TestFlushTelemetryReportsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := tel.Meter.Meter("test").Int64Counter("test.count")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Add(context.Background(), 1)
+	telemetry.NewRecorder(tel.Meter).TokenIssued(context.Background(), "upload", "1", "alice")
 	var logs bytes.Buffer
 	flushTelemetry(tel, slog.New(slog.NewTextHandler(&logs, nil)))
 	if !strings.Contains(logs.String(), "telemetry flush failed") {

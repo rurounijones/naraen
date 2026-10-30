@@ -11,9 +11,12 @@ import (
 	"testing/iotest"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/lfs"
+	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/token"
 )
 
@@ -63,11 +66,23 @@ func grantStore(t *testing.T) *datastore.Store {
 	return st
 }
 
+// session returns a Session for id whose log records go to logs as JSON.
+func session(id string, logs *syncBuffer) Session {
+	return Session{IdentityID: id, IdentityKind: "person", Log: slog.New(slog.NewJSONHandler(logs, nil)).With("identity", id)}
+}
+
+// observedRec returns a Recorder and the reader that sees what it records.
+func observedRec() (*telemetry.Recorder, *sdkmetric.ManualReader) {
+	r := sdkmetric.NewManualReader()
+	return telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(r))), r
+}
+
 func TestAuthenticateIssuesScopedToken(t *testing.T) {
 	signer := testSigner(t)
-	var logs bytes.Buffer
-	a := NewAuthenticator(authz.New(grantStore(t)), signer, testBase, slog.New(slog.NewTextHandler(&logs, nil)))
-	for _, tt := range []struct {
+	logs := &syncBuffer{}
+	rec, metrics := observedRec()
+	a := NewAuthenticator(authz.New(grantStore(t)), signer, testBase, rec)
+	for i, tt := range []struct {
 		id, repo, href string
 		op             lfs.Operation
 	}{
@@ -76,7 +91,7 @@ func TestAuthenticateIssuesScopedToken(t *testing.T) {
 		{"reader", "acme/assets", testBase + "/acme/assets", lfs.Download},
 		{"writer", "acme/old-assets", testBase + "/acme/old-assets", lfs.Upload},
 	} {
-		out, err := a.Handle(context.Background(), tt.id, Command{Name: CmdAuthenticate, Repo: tt.repo, Op: tt.op})
+		out, err := a.Handle(context.Background(), session(tt.id, logs), Command{Name: CmdAuthenticate, Repo: tt.repo, Op: tt.op})
 		if err != nil {
 			t.Fatalf("%s %s %s: %v", tt.id, tt.repo, tt.op, err)
 		}
@@ -102,63 +117,93 @@ func TestAuthenticateIssuesScopedToken(t *testing.T) {
 		if err != nil || c.Subject != tt.id {
 			t.Errorf("token claims = %+v, %v", c, err)
 		}
-		if strings.Contains(logs.String(), tok) {
-			t.Fatal("token logged")
+		if strings.Contains(logs.String(), tok) || strings.Contains(logs.String(), got.Href) {
+			t.Fatal("token or href logged")
 		}
-		// The issue record names the token by its ID, so later requests
-		// can be traced back to it.
-		if !strings.Contains(logs.String(), "token_id="+c.ID) {
-			t.Errorf("token %s not named in the log: %s", c.ID, logs.String())
+		// The audit record names the token by its ID, so a later Batch
+		// request carrying it can be tied back to this issue.
+		rs := logs.records(t, "token issued")
+		if len(rs) != i+1 {
+			t.Fatalf("%d issue records after %d issues", len(rs), i+1)
 		}
+		r := rs[i]
+		checkFields(t, r, map[string]string{
+			"identity":  tt.id,
+			"token_id":  c.ID,
+			"repo":      tt.repo,
+			"repo_id":   "r1",
+			"operation": string(tt.op),
+			"expires":   time.Unix(c.Expires, 0).UTC().Format(time.RFC3339),
+		})
 	}
-	if !strings.Contains(logs.String(), "token issued") || !strings.Contains(logs.String(), "repo_id=r1") {
-		t.Errorf("issue not logged: %s", logs.String())
+	got := counts(t, metrics, telemetry.MetricTokensIssued)
+	want := map[string]int64{
+		"operation=upload,repo=r1,user=writer":   2,
+		"operation=download,repo=r1,user=writer": 1,
+		"operation=download,repo=r1,user=reader": 1,
+	}
+	if len(got) != len(want) {
+		t.Errorf("tokens issued = %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("tokens issued{%s} = %d, want %d", k, got[k], v)
+		}
 	}
 }
 
+// Refusals are reported by the server loop, not here: Handle returns the
+// denial with its reason and records nothing itself.
 func TestAuthenticateRefusals(t *testing.T) {
-	a := NewAuthenticator(authz.New(grantStore(t)), testSigner(t), testBase, quiet())
+	rec, metrics := observedRec()
+	logs := &syncBuffer{}
+	a := NewAuthenticator(authz.New(grantStore(t)), testSigner(t), testBase, rec)
 	for _, tt := range []struct {
 		name, id, repo string
 		op             lfs.Operation
+		reason         authz.Reason
 	}{
-		{"read grant cannot upload", "reader", "acme/assets", lfs.Upload},
-		{"grant on another repo", "other-writer", "acme/assets", lfs.Download},
-		{"no grant at all", "writer", "acme/other", lfs.Download},
-		{"unknown repo", "writer", "acme/missing", lfs.Download},
-		{"inactive identity", "inactive", "acme/assets", lfs.Download},
-		{"unknown identity", "nobody", "acme/assets", lfs.Download},
+		{"read grant cannot upload", "reader", "acme/assets", lfs.Upload, authz.ReasonInsufficientGrant},
+		{"grant on another repo", "other-writer", "acme/assets", lfs.Download, authz.ReasonInsufficientGrant},
+		{"no grant at all", "writer", "acme/other", lfs.Download, authz.ReasonInsufficientGrant},
+		{"unknown repo", "writer", "acme/missing", lfs.Download, authz.ReasonUnknownRepo},
+		{"inactive identity", "inactive", "acme/assets", lfs.Download, authz.ReasonInactiveIdentity},
+		{"unknown identity", "nobody", "acme/assets", lfs.Download, authz.ReasonUnknownIdentity},
 	} {
-		out, err := a.Handle(context.Background(), tt.id, Command{Name: CmdAuthenticate, Repo: tt.repo, Op: tt.op})
-		if !errors.Is(err, authz.ErrDenied) || out != nil {
-			t.Errorf("%s: out = %q, err = %v", tt.name, out, err)
+		out, err := a.Handle(context.Background(), session(tt.id, logs), Command{Name: CmdAuthenticate, Repo: tt.repo, Op: tt.op})
+		if !errors.Is(err, authz.ErrDenied) || authz.ReasonOf(err) != tt.reason || out != nil {
+			t.Errorf("%s: out = %q, err = %v (%s)", tt.name, out, err, authz.ReasonOf(err))
 		}
 	}
-	notReady := NewAuthenticator(authz.New(datastore.NewStore(time.Hour, datastore.DefaultLimits)), testSigner(t), testBase, quiet())
-	if _, err := notReady.Handle(context.Background(), "writer", Command{Name: CmdAuthenticate, Repo: "acme/assets", Op: lfs.Download}); !errors.Is(err, authz.ErrDenied) {
+	notReady := NewAuthenticator(authz.New(datastore.NewStore(time.Hour, datastore.DefaultLimits)), testSigner(t), testBase, rec)
+	if _, err := notReady.Handle(context.Background(), session("writer", logs), Command{Name: CmdAuthenticate, Repo: "acme/assets", Op: lfs.Download}); authz.ReasonOf(err) != authz.ReasonNotReady {
 		t.Errorf("store not ready: err = %v", err)
+	}
+	if logs.String() != "" || len(counts(t, metrics, telemetry.MetricTokensIssued)) != 0 {
+		t.Errorf("refusal recorded as an issue: %s", logs.String())
 	}
 }
 
-// A token that cannot be minted is an internal failure, not a denial, and
-// nothing is recorded as issued.
+// If no token ID can be drawn, nothing is issued: no empty bearer token, no
+// issue record.
 func TestAuthenticateMintFailure(t *testing.T) {
 	signer := testSigner(t)
 	signer.Rand = iotest.ErrReader(errors.New("no entropy"))
-	var logs bytes.Buffer
-	a := NewAuthenticator(authz.New(grantStore(t)), signer, testBase, slog.New(slog.NewTextHandler(&logs, nil)))
-	out, err := a.Handle(context.Background(), "writer", Command{Name: CmdAuthenticate, Repo: "acme/assets", Op: lfs.Upload})
+	rec, metrics := observedRec()
+	logs := &syncBuffer{}
+	a := NewAuthenticator(authz.New(grantStore(t)), signer, testBase, rec)
+	out, err := a.Handle(context.Background(), session("writer", logs), Command{Name: CmdAuthenticate, Repo: "acme/assets", Op: lfs.Upload})
 	if err == nil || errors.Is(err, authz.ErrDenied) || out != nil {
 		t.Fatalf("out = %q, err = %v", out, err)
 	}
-	if logs.String() != "" {
+	if logs.String() != "" || len(counts(t, metrics, telemetry.MetricTokensIssued)) != 0 {
 		t.Errorf("failed mint recorded as an issue: %s", logs.String())
 	}
 }
 
 func TestAuthenticateRefusesTransfer(t *testing.T) {
-	a := NewAuthenticator(authz.New(grantStore(t)), testSigner(t), testBase, quiet())
-	out, err := a.Handle(context.Background(), "writer", Command{Name: CmdTransfer, Repo: "acme/assets", Op: lfs.Upload})
+	a := NewAuthenticator(authz.New(grantStore(t)), testSigner(t), testBase, noRec())
+	out, err := a.Handle(context.Background(), session("writer", &syncBuffer{}), Command{Name: CmdTransfer, Repo: "acme/assets", Op: lfs.Upload})
 	if !errors.Is(err, ErrUnsupported) || out != nil {
 		t.Fatalf("out = %q, err = %v", out, err)
 	}

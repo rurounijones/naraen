@@ -16,20 +16,82 @@ import (
 	"sync"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	collectorlogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	"google.golang.org/protobuf/proto"
 )
 
-// count records one data point on mp, so an export has something to carry.
-func count(t *testing.T, mp *sdkmetric.MeterProvider) {
+// collect returns every counter data point the reader holds, keyed by metric
+// name and then by the point's attributes.
+func collect(t *testing.T, r sdkmetric.Reader) map[string]map[attribute.Distinct]int64 {
 	t.Helper()
-	c, err := mp.Meter(scopeName).Int64Counter("test.count")
-	if err != nil {
+	var rm metricdata.ResourceMetrics
+	if err := r.Collect(context.Background(), &rm); err != nil {
 		t.Fatal(err)
 	}
-	c.Add(context.Background(), 1)
+	got := map[string]map[attribute.Distinct]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		if sm.Scope.Name != scopeName {
+			t.Errorf("scope = %q", sm.Scope.Name)
+		}
+		for _, m := range sm.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok || !sum.IsMonotonic {
+				t.Fatalf("%s is %T, want a monotonic int64 sum", m.Name, m.Data)
+			}
+			got[m.Name] = map[attribute.Distinct]int64{}
+			for _, dp := range sum.DataPoints {
+				got[m.Name][dp.Attributes.Equivalent()] = dp.Value
+			}
+		}
+	}
+	return got
+}
+
+func set(kv ...string) attribute.Distinct {
+	var attrs []attribute.KeyValue
+	for i := 0; i < len(kv); i += 2 {
+		attrs = append(attrs, attribute.String(kv[i], kv[i+1]))
+	}
+	s := attribute.NewSet(attrs...)
+	return s.Equivalent()
+}
+
+func TestRecorder(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	r := NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	ctx := context.Background()
+	r.AuthFailure(ctx, "unknown_key", IdentityTypeUnknown)
+	r.AuthFailure(ctx, "unknown_key", IdentityTypeUnknown)
+	r.AuthFailure(ctx, "insufficient_grant", "person")
+	r.TokenIssued(ctx, "upload", "1", "alice")
+	r.ConnectionRejected(ctx, "rate")
+
+	got := collect(t, reader)
+	want := map[string]map[attribute.Distinct]int64{
+		MetricAuthFailures: {
+			set(LabelReason, "unknown_key", LabelIdentityType, "unknown"):       2,
+			set(LabelReason, "insufficient_grant", LabelIdentityType, "person"): 1,
+		},
+		MetricTokensIssued:     {set(LabelOperation, "upload", LabelRepo, "1", LabelUser, "alice"): 1},
+		MetricSSHConnsRejected: {set(LabelReason, "rate"): 1},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("metrics = %v", got)
+	}
+	for name, points := range want {
+		if len(got[name]) != len(points) {
+			t.Errorf("%s points = %v", name, got[name])
+		}
+		for attrs, v := range points {
+			if got[name][attrs] != v {
+				t.Errorf("%s%v = %d, want %d", name, attrs, got[name][attrs], v)
+			}
+		}
+	}
 }
 
 // receiver is a minimal OTLP/HTTP endpoint that records each push.
@@ -92,7 +154,7 @@ func TestNewExports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count(t, p.Meter)
+	NewRecorder(p.Meter).TokenIssued(context.Background(), "download", "1", "alice")
 	var local bytes.Buffer
 	log := slog.New(p.LogHandler(slog.NewJSONHandler(&local, nil))).With("identity", "alice").WithGroup("g")
 	log.Debug("below the local level")
@@ -122,7 +184,7 @@ func TestNewWithoutEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count(t, p.Meter)
+	NewRecorder(p.Meter).AuthFailure(context.Background(), "unknown_key", IdentityTypeUnknown)
 	local := slog.DiscardHandler
 	if h := p.LogHandler(local); h != local {
 		t.Errorf("LogHandler wrapped the local handler: %T", h)
@@ -163,7 +225,7 @@ func TestShutdownReportsFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count(t, p.Meter)
+	NewRecorder(p.Meter).TokenIssued(context.Background(), "upload", "1", "alice")
 	// The local handler must accept the record for it to be exported.
 	var local bytes.Buffer
 	slog.New(p.LogHandler(slog.NewJSONHandler(&local, nil))).Info("token issued")

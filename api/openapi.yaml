@@ -67,6 +67,40 @@ paths:
         "503":
           description: Datastore not ready or stale, or storage not configured
           content: {application/vnd.git-lfs+json: {schema: {$ref: "#/components/schemas/Error"}}}
+  /{owner}/{repo}/ci/token:
+    post:
+      summary: CI token exchange
+      description: >-
+        A CI workload presents an OIDC token from an issuer the datastore
+        trusts (RS256 or ES256, verified against the trust entry's JWKS, with
+        exactly the entry's audience) and receives a read-only LFS token for
+        the repo the token's repo claim names, which must be the repo in the
+        URL. The body has the shape git-lfs-authenticate prints.
+      security: [{bearer: []}]
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string, maxLength: 100}}
+        - {name: repo, in: path, required: true, schema: {type: string, maxLength: 100}}
+      responses:
+        "200":
+          description: A read-only LFS token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [href, header, expires_in]
+                properties:
+                  href: {type: string}
+                  header: {type: object, additionalProperties: {type: string}}
+                  expires_in: {type: integer}
+        "401":
+          description: Missing, malformed, expired or untrusted OIDC token
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "403":
+          description: A valid token for another repo, or no workload grant on this one
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "503":
+          description: Datastore not ready or stale
+          content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
   /webhooks/github:
     post:
       summary: GitHub webhook; body is authenticated by X-Hub-Signature-256

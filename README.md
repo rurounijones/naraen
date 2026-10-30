@@ -2,7 +2,7 @@
 
 A self-hosted Git LFS server that keeps code on GitHub but stores large files in Amazon S3. Developers authenticate with the SSH keys they already use for GitHub, GitHub decides what they may access, and file bytes go directly between the client and S3, so the server itself only handles small control requests.
 
-> **Status:** early. `git lfs push` and `git lfs pull` work end to end over SSH authentication, the Batch API and pre-signed S3 URLs that bind each upload to its SHA-256 and size. OIDC claim checks and webhook verification are implemented and tested but not yet exposed. The GitHub provider's network sync, the CI token exchange and the per-person download budget are not built yet. Until the provider is, the datastore is loaded from a snapshot file.
+> **Status:** early. `git lfs push` and `git lfs pull` work end to end over SSH authentication, the Batch API and pre-signed S3 URLs that bind each upload to its SHA-256 and size. CI workloads exchange an OIDC token for a read-only LFS token at `/{owner}/{repo}/ci/token`. Webhook verification is implemented and tested but not yet exposed. The GitHub provider's network sync and the per-person download budget are not built yet. Until the provider is, the datastore is loaded from a snapshot file.
 
 ## Goals
 

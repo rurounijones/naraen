@@ -44,8 +44,7 @@ type identity struct {
 // The rows follow the design's matrix. GitHub roles appear as the levels the
 // provider maps them to (triage is read), which the provider's golden tests
 // cover. Outside collaborators have no identity and no loaded key, so they
-// are the unknown-key row. CI workloads over OIDC are not here yet: the token
-// exchange endpoint does not exist.
+// are the unknown-key row. CI workloads over OIDC are TestCIMatrix.
 var matrix = []identity{
 	{name: "admin", kind: datastore.KindPerson, active: true, inStore: true, level: datastore.LevelAdmin},
 	{name: "maintainer", kind: datastore.KindPerson, active: true, inStore: true, level: datastore.LevelMaintain},
@@ -81,6 +80,7 @@ type env struct {
 	bucket     string
 	tlsCert    string        // the server certificate, trusted by git-lfs
 	home       string        // HOME for git, with git-lfs set up
+	ci         *ciIssuer     // the OIDC issuer the snapshot trusts
 	tokens     *token.Signer // holds the key the server mints with
 }
 
@@ -339,6 +339,7 @@ func startServer(t *testing.T) *env {
 			data.Grants = append(data.Grants, datastore.Grant{IdentityID: id.name, RepoID: repo, Level: id.level})
 		}
 	}
+	e.ci = addCI(t, &data)
 	snapJSON, err := json.Marshal(data)
 	if err != nil {
 		t.Fatal(err)

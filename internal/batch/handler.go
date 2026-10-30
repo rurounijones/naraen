@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -87,7 +86,7 @@ type objectError struct {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := h.Log.With("remote", r.RemoteAddr)
-	tok, ok := Bearer(r.Header.Get("Authorization"))
+	tok, ok := token.Bearer(r.Header.Get("Authorization"))
 	if !ok {
 		h.refuse(ctx, w, log, http.StatusUnauthorized, reasonBadToken, telemetry.IdentityTypeUnknown)
 		return
@@ -227,15 +226,6 @@ func (h *Handler) refuse(ctx context.Context, w http.ResponseWriter, log *slog.L
 		msg = "forbidden"
 	}
 	writeError(w, status, msg)
-}
-
-// Bearer extracts the token from an Authorization header value.
-func Bearer(header string) (string, bool) {
-	tok, ok := strings.CutPrefix(header, "Bearer ")
-	if !ok || tok == "" || strings.ContainsAny(tok, " \t") {
-		return "", false
-	}
-	return tok, true
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

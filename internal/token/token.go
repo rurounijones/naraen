@@ -188,3 +188,14 @@ func mac(k Key, payload string) []byte {
 	m.Write([]byte(domain + k.ID + "." + payload))
 	return m.Sum(nil)
 }
+
+// Bearer extracts the token from an Authorization header value. It accepts
+// exactly "Bearer <token>" with no further whitespace, so a token is never
+// read out of some other scheme or a padded value.
+func Bearer(header string) (string, bool) {
+	tok, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok || tok == "" || strings.ContainsAny(tok, " 	") {
+		return "", false
+	}
+	return tok, true
+}

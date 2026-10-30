@@ -403,33 +403,3 @@ func TestUnconfigured(t *testing.T) {
 		t.Errorf("status %d, type %q", w.Code, w.Header().Get("Content-Type"))
 	}
 }
-
-func TestBearer(t *testing.T) {
-	for header, want := range map[string]string{
-		"Bearer abc":  "abc",
-		"Bearer ":     "",
-		"bearer abc":  "",
-		"Bearer a b":  "",
-		"Bearer a\tb": "",
-		"Basic abc":   "",
-		"":            "",
-		"Bearerabc":   "",
-	} {
-		got, ok := Bearer(header)
-		if got != want || ok != (want != "") {
-			t.Errorf("Bearer(%q) = %q, %v", header, got, ok)
-		}
-	}
-}
-
-func FuzzBearer(f *testing.F) {
-	for _, s := range []string{"Bearer abc", "Bearer ", "Basic x", ""} {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, header string) {
-		tok, ok := Bearer(header)
-		if ok && (tok == "" || strings.ContainsAny(tok, " \t") || "Bearer "+tok != header) {
-			t.Fatalf("Bearer(%q) = %q", header, tok)
-		}
-	})
-}

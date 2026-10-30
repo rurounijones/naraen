@@ -10,7 +10,11 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/rurounijones/naraen/internal/datastore"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 // scripted returns the next result on each FullSync and cancels the run
@@ -61,9 +65,10 @@ func TestRun(t *testing.T) {
 		func() (*datastore.Snapshot, error) { return snapshot(t, 0), nil },
 	}}
 	var logs bytes.Buffer
+	reader := sdkmetric.NewManualReader()
 	done := make(chan struct{})
 	go func() {
-		Run(ctx, p, store, time.Millisecond, slog.New(slog.NewTextHandler(&logs, nil)))
+		Run(ctx, p, store, time.Millisecond, telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))), slog.New(slog.NewTextHandler(&logs, nil)))
 		close(done)
 	}()
 	select {
@@ -73,6 +78,24 @@ func TestRun(t *testing.T) {
 	}
 	if cur, err := store.Current(); err != nil || cur != good {
 		t.Errorf("store holds %v, %v; want the first snapshot", cur, err)
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	failures := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if s, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == telemetry.MetricSyncFailures {
+				for _, dp := range s.DataPoints {
+					v, _ := dp.Attributes.Value(telemetry.LabelReason)
+					failures[v.AsString()] = dp.Value
+				}
+			}
+		}
+	}
+	if failures["failed"] != 1 || failures["rejected"] != 1 {
+		t.Errorf("sync failures = %v", failures)
 	}
 	out := logs.String()
 	applied, failed, rejected := strings.Index(out, "full sync applied"), strings.Index(out, "full sync failed"), strings.Index(out, "full sync rejected")

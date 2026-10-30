@@ -94,6 +94,17 @@ func (s *Store) Current() (*Snapshot, error) {
 	return p.snap, nil
 }
 
+// Age returns how long ago the live snapshot's sync began reading its source,
+// or false before the first swap. It is for monitoring: an alert on it can
+// fire well before the staleness limit makes Current refuse.
+func (s *Store) Age() (time.Duration, bool) {
+	p := s.cur.Load()
+	if p == nil {
+		return 0, false
+	}
+	return s.Now().Sub(p.start.at), true
+}
+
 // Ready reports whether Current would return a snapshot.
 func (s *Store) Ready() bool {
 	_, err := s.Current()

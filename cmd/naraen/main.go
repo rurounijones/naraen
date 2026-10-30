@@ -87,6 +87,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	}
 
 	store := datastore.NewStore(cfg.SnapshotMaxAge, datastore.DefaultLimits)
+	telemetry.ObserveDatastoreAge(tel.Meter, store.Age)
 	if cfg.SnapshotFile != "" {
 		if err := loadSnapshot(store, cfg.SnapshotFile, cfg.Dev); err != nil {
 			return err
@@ -102,7 +103,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 		if err != nil {
 			return err
 		}
-		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, log)
+		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, rec, log)
 	}
 
 	if cfg.Dev {

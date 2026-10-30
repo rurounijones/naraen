@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -73,6 +74,7 @@ func TestRecorder(t *testing.T) {
 	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeIssued)
 	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeMissing)
 	r.BytesRequested(ctx, "download", "1", "alice", 300)
+	r.SyncFailure(ctx, "rejected")
 
 	got := collect(t, reader)
 	want := map[string]map[attribute.Distinct]int64{
@@ -87,6 +89,7 @@ func TestRecorder(t *testing.T) {
 			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "missing"): 1,
 		},
 		MetricBytesRequested: {set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice"): 300},
+		MetricSyncFailures:   {set(LabelReason, "rejected"): 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("metrics = %v", got)
@@ -273,5 +276,33 @@ func TestRecorderObjectSize(t *testing.T) {
 	dp := h.DataPoints[0]
 	if dp.Count != 2 || dp.Sum != 150 || dp.Attributes.Equivalent() != set(LabelOperation, "upload", LabelRepo, "1") {
 		t.Errorf("point = %+v", dp)
+	}
+}
+
+func TestObserveDatastoreAge(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	age, ok := time.Duration(0), false
+	ObserveDatastoreAge(mp, func() (time.Duration, bool) { return age, ok })
+	gauge := func() []metricdata.DataPoint[float64] {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatal(err)
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if g, ok := m.Data.(metricdata.Gauge[float64]); ok && m.Name == MetricDatastoreAge {
+					return g.DataPoints
+				}
+			}
+		}
+		return nil
+	}
+	if pts := gauge(); len(pts) != 0 {
+		t.Errorf("age reported before a snapshot: %+v", pts)
+	}
+	age, ok = 90*time.Second, true
+	if pts := gauge(); len(pts) != 1 || pts[0].Value != 90 {
+		t.Errorf("age = %+v, want 90", pts)
 	}
 }

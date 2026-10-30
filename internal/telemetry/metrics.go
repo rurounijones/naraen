@@ -5,6 +5,7 @@ package telemetry
 
 import (
 	"context"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -20,6 +21,8 @@ const (
 	MetricTokensIssued     = "lfs.tokens.issued" // #nosec G101 -- a metric name, not a credential
 	MetricSSHConnsRejected = "lfs.ssh.connections.rejected"
 	MetricTransferFeedLag  = "lfs.transfer_feed.lag"
+	MetricDatastoreAge     = "lfs.datastore.age"
+	MetricSyncFailures     = "lfs.sync.failures"
 )
 
 // Label names allowed on metrics.
@@ -49,6 +52,7 @@ type Recorder struct {
 	linksIssued   metric.Int64Counter
 	bytesReq      metric.Int64Counter
 	objectSize    metric.Int64Histogram
+	syncFailures  metric.Int64Counter
 }
 
 // NewRecorder creates the instruments on mp.
@@ -75,9 +79,12 @@ func NewRecorder(mp metric.MeterProvider) *Recorder {
 	objectSize, _ := m.Int64Histogram(MetricObjectSize,
 		metric.WithUnit("By"),
 		metric.WithDescription("Size of each object a link was issued for"))
+	syncFailures, _ := m.Int64Counter(MetricSyncFailures,
+		metric.WithUnit("{sync}"),
+		metric.WithDescription("Provider full syncs that failed or that the datastore rejected"))
 	return &Recorder{
 		authFailures: authFailures, tokensIssued: tokensIssued, connsRejected: connsRejected,
-		linksIssued: linksIssued, bytesReq: bytesReq, objectSize: objectSize,
+		linksIssued: linksIssued, bytesReq: bytesReq, objectSize: objectSize, syncFailures: syncFailures,
 	}
 }
 
@@ -137,4 +144,28 @@ func (r *Recorder) ObjectSize(ctx context.Context, op, repoID string, size int64
 	r.objectSize.Record(ctx, size, metric.WithAttributes(
 		attribute.String(LabelOperation, op),
 		attribute.String(LabelRepo, repoID)))
+}
+
+// SyncFailure counts one provider full sync that did not reach the datastore.
+// reason is "failed" (the source could not be read) or "rejected" (the store
+// refused the snapshot).
+func (r *Recorder) SyncFailure(ctx context.Context, reason string) {
+	r.syncFailures.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelReason, reason)))
+}
+
+// ObserveDatastoreAge reports age, in seconds, as lfs.datastore.age at every
+// collection: how old the snapshot serving requests is. The alert on it fires
+// well before the staleness limit stops service. Nothing is reported until
+// age has a value. As in NewRecorder, a registration error could only come
+// from the constant name or unit, which TestObserveDatastoreAge exports.
+func ObserveDatastoreAge(mp metric.MeterProvider, age func() (time.Duration, bool)) {
+	_, _ = mp.Meter(scopeName).Float64ObservableGauge(MetricDatastoreAge,
+		metric.WithUnit("s"),
+		metric.WithDescription("Seconds since the live datastore snapshot's sync began reading its source"),
+		metric.WithFloat64Callback(func(_ context.Context, o metric.Float64Observer) error {
+			if a, ok := age(); ok {
+				o.Observe(a.Seconds())
+			}
+			return nil
+		}))
 }

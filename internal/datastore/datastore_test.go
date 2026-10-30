@@ -630,3 +630,29 @@ func FuzzParseSnapshot(f *testing.F) {
 		}
 	})
 }
+
+func TestAge(t *testing.T) {
+	st := NewStore(time.Hour, DefaultLimits)
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	st.Now = func() time.Time { return now }
+	if age, ok := st.Age(); ok || age != 0 {
+		t.Errorf("before the first swap: %v, %v", age, ok)
+	}
+	start := st.StartSync()
+	snap, err := NewSnapshot(Data{
+		Identities: []Identity{{ID: "a", Kind: KindPerson, Active: true}},
+		Repos:      []Repo{{ID: "1", Path: "acme/x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if err := st.Swap(start, snap); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(10 * time.Minute)
+	// Age counts from when the sync began, not when it was swapped in.
+	if age, ok := st.Age(); !ok || age != 11*time.Minute {
+		t.Errorf("age = %v, %v; want 11m", age, ok)
+	}
+}

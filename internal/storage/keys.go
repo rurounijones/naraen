@@ -25,9 +25,18 @@ type Link struct {
 	Expires time.Time
 }
 
-// Presigner issues 15-minute pre-signed URLs. Upload links sign the SHA-256
-// checksum and content length so S3 rejects bytes that do not match the OID.
+// LinkTTL is how long a pre-signed URL stays valid. S3 checks a link only when
+// a transfer starts, so a large transfer still completes after it expires.
+const LinkTTL = 15 * time.Minute
+
+// Presigner issues pre-signed URLs valid for LinkTTL and reports what a repo
+// already has stored. Upload links sign the SHA-256 checksum and content
+// length so S3 rejects bytes that do not match the OID. requestID is carried in each URL
+// so S3's access logs tie a transfer to the request that authorized it.
 type Presigner interface {
 	PresignGet(ctx context.Context, repoID string, id oid.OID, requestID string) (Link, error)
 	PresignPut(ctx context.Context, repoID string, id oid.OID, size int64, requestID string) (Link, error)
+	// Stat returns the stored size of an object, or found false if the
+	// repo does not have it stored.
+	Stat(ctx context.Context, repoID string, id oid.OID) (size int64, found bool, err error)
 }

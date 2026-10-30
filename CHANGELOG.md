@@ -11,6 +11,7 @@ The first release has not been cut yet, so everything so far is listed as added.
 ### Added
 
 - Developer sign-in with the SSH keys they already use on GitHub, and bearer tokens that last 15 minutes and are bound to one repo and operation.
+- Upload links that bind each object to its SHA-256 and size, so S3 rejects bytes that do not match.
 - Fail-closed authorization from an in-memory snapshot. Requests are refused until there is a snapshot and once the snapshot is older than its maximum age.
 - Validation before each snapshot swap, which rejects a sync that changes identities or grants by an unusually large amount.
 - An audit record for every SSH sign-in, refusal and token issued.

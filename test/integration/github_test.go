@@ -106,14 +106,28 @@ func TestGitHubProviderEndToEnd(t *testing.T) {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
 
-	// Removing the member from the org on GitHub locks them out at once,
-	// through the webhook, without waiting for the next full sync.
-	removal := []byte(`{"action":"member_removed","membership":{"user":{"id":501,"login":"writer"}}}`)
-	m := hmac.New(sha256.New, []byte(webhookSecret))
-	m.Write(removal)
-	if code := e.deliverEvent(t, "organization", removal, "sha256="+hex.EncodeToString(m.Sum(nil))); code != http.StatusAccepted {
-		t.Fatalf("member_removed delivery: %d", code)
+	// Webhooks apply removals at once, without waiting for the next full
+	// sync. Removing the collaborator drops the grant: the key still signs
+	// in, but the request is refused.
+	signed := func(event string, body []byte) int {
+		m := hmac.New(sha256.New, []byte(webhookSecret))
+		m.Write(body)
+		return e.deliverEvent(t, event, body, "sha256="+hex.EncodeToString(m.Sum(nil)))
+	}
+	if code := signed("member", []byte(`{"action":"removed","member":{"id":501,"login":"writer"},"repository":{"id":1}}`)); code != http.StatusAccepted {
+		t.Fatalf("member removed delivery: %d", code)
 	}
 	_, err = e.ssh(t, "writer", sourceFor(3), "git-lfs-authenticate acme/assets download")
-	checkDenied(t, err)
+	if err == nil || !strings.Contains(err.Error(), requestRefused) {
+		t.Fatalf("after collaborator removal: %v", err)
+	}
+	// Removing the member from the org deactivates them: the key itself
+	// is refused.
+	if code := signed("organization", []byte(`{"action":"member_removed","membership":{"user":{"id":501,"login":"writer"}}}`)); code != http.StatusAccepted {
+		t.Fatalf("member_removed delivery: %d", code)
+	}
+	_, err = e.ssh(t, "writer", sourceFor(4), "git-lfs-authenticate acme/assets download")
+	if err == nil || !strings.Contains(err.Error(), keyRefused) {
+		t.Fatalf("after org removal: %v", err)
+	}
 }

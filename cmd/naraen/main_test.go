@@ -282,7 +282,7 @@ func TestLoadTokenSigner(t *testing.T) {
 	}
 	// A token minted by the configured key verifies with a signer built from
 	// that key alone, so the configured key is the one minting.
-	tok, _ := s.Mint("alice", "1", lfs.Download)
+	tok, _, _ := s.Mint("alice", "1", lfs.Download)
 	only, err := token.NewSigner(configured, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func TestLoadTokenSigner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ephemeral key: %v", err)
 	}
-	devTok, _ := dev.Mint("alice", "1", lfs.Download)
+	devTok, _, _ := dev.Mint("alice", "1", lfs.Download)
 	if _, err := only.Verify(devTok, "1", lfs.Download); err == nil {
 		t.Error("ephemeral signer minted with the configured key")
 	}

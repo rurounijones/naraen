@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -104,6 +105,11 @@ func TestAuthenticateIssuesScopedToken(t *testing.T) {
 		if strings.Contains(logs.String(), tok) {
 			t.Fatal("token logged")
 		}
+		// The issue record names the token by its ID, so later requests
+		// can be traced back to it.
+		if !strings.Contains(logs.String(), "token_id="+c.ID) {
+			t.Errorf("token %s not named in the log: %s", c.ID, logs.String())
+		}
 	}
 	if !strings.Contains(logs.String(), "token issued") || !strings.Contains(logs.String(), "repo_id=r1") {
 		t.Errorf("issue not logged: %s", logs.String())
@@ -131,6 +137,22 @@ func TestAuthenticateRefusals(t *testing.T) {
 	notReady := NewAuthenticator(authz.New(datastore.NewStore(time.Hour, datastore.DefaultLimits)), testSigner(t), testBase, quiet())
 	if _, err := notReady.Handle(context.Background(), "writer", Command{Name: CmdAuthenticate, Repo: "acme/assets", Op: lfs.Download}); !errors.Is(err, authz.ErrDenied) {
 		t.Errorf("store not ready: err = %v", err)
+	}
+}
+
+// A token that cannot be minted is an internal failure, not a denial, and
+// nothing is recorded as issued.
+func TestAuthenticateMintFailure(t *testing.T) {
+	signer := testSigner(t)
+	signer.Rand = iotest.ErrReader(errors.New("no entropy"))
+	var logs bytes.Buffer
+	a := NewAuthenticator(authz.New(grantStore(t)), signer, testBase, slog.New(slog.NewTextHandler(&logs, nil)))
+	out, err := a.Handle(context.Background(), "writer", Command{Name: CmdAuthenticate, Repo: "acme/assets", Op: lfs.Upload})
+	if err == nil || errors.Is(err, authz.ErrDenied) || out != nil {
+		t.Fatalf("out = %q, err = %v", out, err)
+	}
+	if logs.String() != "" {
+		t.Errorf("failed mint recorded as an issue: %s", logs.String())
 	}
 }
 

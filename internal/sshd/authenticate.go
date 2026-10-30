@@ -38,8 +38,8 @@ type authResponse struct {
 	ExpiresIn int64             `json:"expires_in"`
 }
 
-// Handle implements Handler. The only error it returns besides ErrUnsupported
-// is authz.ErrDenied, which says nothing about why.
+// Handle implements Handler. It returns ErrUnsupported, a denial from authz
+// (which says nothing about why), or an error minting the token.
 func (a *Authenticator) Handle(ctx context.Context, identityID string, cmd Command) ([]byte, error) {
 	if cmd.Name != CmdAuthenticate {
 		return nil, ErrUnsupported
@@ -48,8 +48,10 @@ func (a *Authenticator) Handle(ctx context.Context, identityID string, cmd Comma
 	if err != nil {
 		return nil, err
 	}
-	// Mint cannot fail; its error is reserved.
-	tok, _ := a.tokens.Mint(identityID, repoID, cmd.Op)
+	tok, claims, err := a.tokens.Mint(identityID, repoID, cmd.Op)
+	if err != nil {
+		return nil, err
+	}
 	// The response holds only strings and an integer, so Marshal cannot fail.
 	out, _ := json.Marshal(authResponse{
 		// The client's own spelling of the path, already normalized: an alias
@@ -58,8 +60,8 @@ func (a *Authenticator) Handle(ctx context.Context, identityID string, cmd Comma
 		Header:    map[string]string{"Authorization": "Bearer " + tok},
 		ExpiresIn: int64(a.tokens.TTL().Seconds()),
 	})
-	// An audit record of the decision. The token itself and the href are
-	// never logged.
-	a.log.InfoContext(ctx, "token issued", "identity", identityID, "repo_id", repoID, "operation", cmd.Op)
+	// An audit record of the decision. The token ID is not a credential;
+	// the token itself and the href are never logged.
+	a.log.InfoContext(ctx, "token issued", "identity", identityID, "token_id", claims.ID, "repo_id", repoID, "operation", cmd.Op)
 	return append(out, '\n'), nil
 }

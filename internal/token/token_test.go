@@ -68,7 +68,7 @@ func TestNewSignerValidation(t *testing.T) {
 
 func TestRoundTrip(t *testing.T) {
 	s := newSigner(t)
-	tok, err := s.Mint("alice", "r1", lfs.Download)
+	tok, minted, err := s.Mint("alice", "r1", lfs.Download)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,20 +82,42 @@ func TestRoundTrip(t *testing.T) {
 	if c.Subject != "alice" || c.RepoID != "r1" || c.Op != lfs.Download {
 		t.Errorf("claims = %+v", c)
 	}
+	if c != minted || len(c.ID) != 22 || c.Expires != t0.Add(15*time.Minute).Unix() {
+		t.Errorf("verified %+v, minted %+v", c, minted)
+	}
+}
+
+// Two tokens for the same identity, repo and operation in the same second
+// still differ, so each can be traced to its own issue record.
+func TestTokenIDsAreUnique(t *testing.T) {
+	s := newSigner(t)
+	a, ca, _ := s.Mint("alice", "r1", lfs.Download)
+	b, cb, _ := s.Mint("alice", "r1", lfs.Download)
+	if a == b || ca.ID == cb.ID {
+		t.Fatalf("identical tokens %q and %q", a, b)
+	}
+}
+
+func TestMintFailsWithoutRandomness(t *testing.T) {
+	s := newSigner(t)
+	s.Rand = bytes.NewReader(make([]byte, idBytes-1))
+	if tok, c, err := s.Mint("alice", "r1", lfs.Download); err == nil || tok != "" || c != (Claims{}) {
+		t.Fatalf("Mint = %q, %+v, %v; want an error and nothing else", tok, c, err)
+	}
 }
 
 // After rotation, the new key mints and tokens from the old key still verify
 // until the old key is removed from the list.
 func TestKeyRotation(t *testing.T) {
 	old := newSigner(t, key)
-	tok, _ := old.Mint("alice", "r1", lfs.Download)
+	tok, _, _ := old.Mint("alice", "r1", lfs.Download)
 
 	next := Key{ID: "k2", Secret: secret(50)}
 	rotated := newSigner(t, next, key)
 	if _, err := rotated.Verify(tok, "r1", lfs.Download); err != nil {
 		t.Fatalf("token from previous key rejected: %v", err)
 	}
-	fresh, _ := rotated.Mint("alice", "r1", lfs.Download)
+	fresh, _, _ := rotated.Mint("alice", "r1", lfs.Download)
 	if !strings.HasPrefix(fresh, "v1.k2.") {
 		t.Fatalf("rotated signer minted with %q", fresh)
 	}
@@ -107,7 +129,7 @@ func TestKeyRotation(t *testing.T) {
 
 func TestVerifyRejects(t *testing.T) {
 	s := newSigner(t)
-	good, _ := s.Mint("alice", "r1", lfs.Download)
+	good, _, _ := s.Mint("alice", "r1", lfs.Download)
 	parts := strings.Split(good, ".")
 	payload, sig := parts[2], parts[3]
 	with := func(i int, v string) string {
@@ -116,8 +138,8 @@ func TestVerifyRejects(t *testing.T) {
 		return strings.Join(p, ".")
 	}
 
-	foreign, _ := newSigner(t, Key{ID: "k1", Secret: secret(9)}).Mint("alice", "r1", lfs.Download)
-	noSubject, _ := s.Mint("", "r1", lfs.Download)
+	foreign, _, _ := newSigner(t, Key{ID: "k1", Secret: secret(9)}).Mint("alice", "r1", lfs.Download)
+	noSubject, _, _ := s.Mint("", "r1", lfs.Download)
 
 	// A MAC over the bare payload, as an undomained or unversioned scheme
 	// would compute it, must not verify.
@@ -162,7 +184,7 @@ func TestVerifyRejects(t *testing.T) {
 func TestKeyIDIsSigned(t *testing.T) {
 	a, b := Key{ID: "a", Secret: secret(1)}, Key{ID: "b", Secret: secret(1)}
 	s := newSigner(t, a, b)
-	tok, _ := s.Mint("alice", "r1", lfs.Download)
+	tok, _, _ := s.Mint("alice", "r1", lfs.Download)
 	relabelled := "v1.b." + strings.SplitN(tok, ".", 3)[2]
 	if _, err := s.Verify(relabelled, "r1", lfs.Download); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("relabelled token accepted: %v", err)
@@ -189,7 +211,7 @@ func nonCanonical(c byte) string {
 func TestVerifyAcceptsMaximumLength(t *testing.T) {
 	s := newSigner(t)
 	for n := 1; n < maxTokenLength; n++ {
-		tok, _ := s.Mint("alice", strings.Repeat("r", n), lfs.Upload)
+		tok, _, _ := s.Mint("alice", strings.Repeat("r", n), lfs.Upload)
 		if len(tok) < maxTokenLength {
 			continue
 		}
@@ -209,7 +231,7 @@ func TestVerifyAcceptsMaximumLength(t *testing.T) {
 
 func TestExpiry(t *testing.T) {
 	s := newSigner(t)
-	tok, _ := s.Mint("alice", "r1", lfs.Upload)
+	tok, _, _ := s.Mint("alice", "r1", lfs.Upload)
 
 	s.Now = func() time.Time { return t0.Add(15*time.Minute - time.Second) }
 	if _, err := s.Verify(tok, "r1", lfs.Upload); err != nil {
@@ -227,7 +249,7 @@ func TestSignerCopiesKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := s.Mint("a", "r", lfs.Download)
+	tok, _, _ := s.Mint("a", "r", lfs.Download)
 	k[0] = 99
 	if _, err := s.Verify(tok, "r", lfs.Download); err != nil {
 		t.Errorf("caller mutation of key affected signer: %v", err)
@@ -239,7 +261,7 @@ func FuzzVerify(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	good, _ := s.Mint("alice", "r1", lfs.Download)
+	good, _, _ := s.Mint("alice", "r1", lfs.Download)
 	f.Add(good)
 	f.Add("")
 	f.Add("v1.k1.a.b")
@@ -258,6 +280,7 @@ func TestVerifyRejectsSignedGarbage(t *testing.T) {
 	for name, p := range map[string]string{
 		"not base64": "!!!!",
 		"not json":   enc.EncodeToString([]byte("not json")),
+		"no id":      enc.EncodeToString([]byte(`{"sub":"alice","rid":"r1","op":"download","exp":9999999999}`)),
 	} {
 		tok := "v1.k1." + p + "." + enc.EncodeToString(mac(key, p))
 		if _, err := s.Verify(tok, "r1", lfs.Download); !errors.Is(err, ErrInvalid) {

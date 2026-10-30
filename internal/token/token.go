@@ -11,11 +11,13 @@ package token
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -27,6 +29,8 @@ const (
 	MinKeyLength = 32
 	// maxTokenLength bounds untrusted input before any decoding.
 	maxTokenLength = 1024
+	// idBytes is the size of a token ID: 128 random bits, so IDs never repeat.
+	idBytes = 16
 	// maxKeyIDLength bounds key IDs, which travel in every token.
 	maxKeyIDLength = 16
 
@@ -43,6 +47,10 @@ var enc = base64.RawURLEncoding.Strict()
 
 // Claims is the signed payload.
 type Claims struct {
+	// ID is unique per token. It is not secret: audit records carry it so a
+	// Batch request, and the S3 transfers it authorizes, can be traced back
+	// to the authentication that issued the token.
+	ID      string        `json:"jti"`
 	Subject string        `json:"sub"`
 	RepoID  string        `json:"rid"`
 	Op      lfs.Operation `json:"op"`
@@ -61,6 +69,8 @@ type Signer struct {
 	ttl  time.Duration
 	// Now is replaceable in tests.
 	Now func() time.Time
+	// Rand supplies token IDs; it is replaceable in tests.
+	Rand io.Reader
 }
 
 // NewSigner returns a Signer. keys[0] mints; every key verifies, so a rotated
@@ -74,7 +84,7 @@ func NewSigner(keys []Key, ttl time.Duration) (*Signer, error) {
 	if ttl <= 0 {
 		return nil, errors.New("token: ttl must be positive")
 	}
-	s := &Signer{ttl: ttl, Now: time.Now}
+	s := &Signer{ttl: ttl, Now: time.Now, Rand: rand.Reader}
 	seen := make(map[string]bool, len(keys))
 	for _, k := range keys {
 		if !validKeyID(k.ID) || seen[k.ID] {
@@ -111,14 +121,19 @@ func validKeyID(id string) bool {
 // TTL returns the lifetime of minted tokens.
 func (s *Signer) TTL() time.Duration { return s.ttl }
 
-// Mint returns a token for subject, repoID and op, signed with the first key.
-func (s *Signer) Mint(subject, repoID string, op lfs.Operation) (string, error) {
-	c := Claims{Subject: subject, RepoID: repoID, Op: op, Expires: s.Now().Add(s.ttl).Unix()}
+// Mint returns a token for subject, repoID and op, signed with the first key,
+// and the claims it carries. It fails only if no token ID can be drawn.
+func (s *Signer) Mint(subject, repoID string, op lfs.Operation) (string, Claims, error) {
+	id := make([]byte, idBytes)
+	if _, err := io.ReadFull(s.Rand, id); err != nil {
+		return "", Claims{}, fmt.Errorf("token: id: %w", err)
+	}
+	c := Claims{ID: enc.EncodeToString(id), Subject: subject, RepoID: repoID, Op: op, Expires: s.Now().Add(s.ttl).Unix()}
 	// Claims holds only strings and integers, so Marshal cannot fail.
 	payload, _ := json.Marshal(c)
 	k := s.keys[0]
 	p := enc.EncodeToString(payload)
-	return version + "." + k.ID + "." + p + "." + enc.EncodeToString(mac(k, p)), nil
+	return version + "." + k.ID + "." + p + "." + enc.EncodeToString(mac(k, p)), c, nil
 }
 
 // Verify checks version, key, signature, expiry, and that the token was
@@ -148,7 +163,9 @@ func (s *Signer) Verify(tok, repoID string, op lfs.Operation) (Claims, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return Claims{}, ErrInvalid
 	}
-	if c.Subject == "" || !s.Now().Before(time.Unix(c.Expires, 0)) {
+	// Every token this package mints has an ID; one without was not minted
+	// here and could not be traced.
+	if c.ID == "" || c.Subject == "" || !s.Now().Before(time.Unix(c.Expires, 0)) {
 		return Claims{}, ErrInvalid
 	}
 	if c.RepoID != repoID || c.Op != op {

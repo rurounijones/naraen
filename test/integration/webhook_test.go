@@ -43,11 +43,17 @@ func TestWebhookRevokesDeployKey(t *testing.T) {
 
 func (e *env) deliver(t *testing.T, body []byte, sig string) int {
 	t.Helper()
+	return e.deliverEvent(t, "deploy_key", body, sig)
+}
+
+// deliverEvent posts a webhook delivery of the named event to the server.
+func (e *env) deliverEvent(t *testing.T, event string, body []byte, sig string) int {
+	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, e.publicURL+"/webhooks/github", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("X-GitHub-Event", "deploy_key")
+	req.Header.Set("X-GitHub-Event", event)
 	req.Header.Set("X-GitHub-Delivery", "test-delivery")
 	req.Header.Set("X-Hub-Signature-256", sig)
 	resp, err := e.httpClient(t).Do(req)

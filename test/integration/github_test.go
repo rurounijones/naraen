@@ -3,9 +3,12 @@
 package integration
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net/http"
@@ -102,4 +105,15 @@ func TestGitHubProviderEndToEnd(t *testing.T) {
 	if out, err := e.git(t, "writer", sourceFor(2), dir, nil, "lfs", "push", "origin", "main"); err != nil || !stored(t, e.bucket, "1", oidFor(content)) {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
+
+	// Removing the member from the org on GitHub locks them out at once,
+	// through the webhook, without waiting for the next full sync.
+	removal := []byte(`{"action":"member_removed","membership":{"user":{"id":501,"login":"writer"}}}`)
+	m := hmac.New(sha256.New, []byte(webhookSecret))
+	m.Write(removal)
+	if code := e.deliverEvent(t, "organization", removal, "sha256="+hex.EncodeToString(m.Sum(nil))); code != http.StatusAccepted {
+		t.Fatalf("member_removed delivery: %d", code)
+	}
+	_, err = e.ssh(t, "writer", sourceFor(3), "git-lfs-authenticate acme/assets download")
+	checkDenied(t, err)
 }

@@ -2,7 +2,7 @@
 
 A self-hosted Git LFS server that keeps code on GitHub but stores large files in Amazon S3. Developers authenticate with the SSH keys they already use for GitHub, GitHub decides what they may access, and file bytes go directly between the client and S3, so the server itself only handles small control requests.
 
-> **Status:** early. `git-lfs-authenticate` works end to end: the server authenticates the SSH key, checks the grant and returns a scoped 15-minute token. The other request-path building blocks (Batch parsing, OIDC claim checks, webhook verification) are implemented and tested. The Batch handler, S3 presigning and the GitHub provider's network sync are not built yet. Until the provider is, the datastore is loaded from a snapshot file.
+> **Status:** early. `git lfs push` and `git lfs pull` work end to end over SSH authentication, the Batch API and pre-signed S3 URLs that bind each upload to its SHA-256 and size. OIDC claim checks and webhook verification are implemented and tested but not yet exposed. The GitHub provider's network sync, the CI token exchange and the per-person download budget are not built yet. Until the provider is, the datastore is loaded from a snapshot file.
 
 ## Goals
 
@@ -92,7 +92,7 @@ Everything runs in a container; no host Go toolchain is required.
 | `task ci` | `check` plus fuzz, mutation, integration, image scan and DAST |
 | `task test`, `task cover` | Unit tests, line and branch coverage gates |
 | `task fuzz`, `task mutation` | Fuzzing (`FUZZTIME=5m`) and mutation testing |
-| `task integration` | The access matrix with real OpenSSH against the built server (git and git-lfs once the Batch API exists), with a local S3 alongside (`docker compose up -d s3`) |
+| `task integration` | The access matrix with real git, git-lfs and OpenSSH against the built server and a signature-checking local S3 (`docker compose up -d s3`), plus upload-integrity checks of the signed links |
 | `task image`, `task scan`, `task dast` | Build the runtime image, scan it, run DAST |
 | `task build`, `task release-check` | Release binaries for this platform, or validate the release config and build every target, in `dist/` |
 
@@ -110,7 +110,7 @@ The host key is ephemeral in development mode, so ssh asks you to trust it on ev
 
 The href in the answer comes from `NARAEN_PUBLIC_URL`, which defaults to localhost in development mode; set it to the name other machines reach the server by before trying from one.
 
-To use it from a repository, set `lfs.url` to `ssh://git@localhost:2222/example/repo`. Point `GIT_SSH_COMMAND` at the key, for example `ssh -i test/testdata/devkeys/writer -o IdentitiesOnly=yes`. `git lfs push` then authenticates and stops at the Batch API, which is not built yet.
+To use it from a repository, set `lfs.url` to `ssh://git@localhost:2222/example/repo`. Point `GIT_SSH_COMMAND` at the key, for example `ssh -i test/testdata/devkeys/writer -o IdentitiesOnly=yes`. The compose service has no storage configured, so `git lfs push` then authenticates and the Batch API answers 503 "storage not configured". `test/integration/lfs_test.go` shows a complete setup with SeaweedFS: a bucket, signer credentials and `NARAEN_S3_ENDPOINT`.
 
 ### Configuration
 

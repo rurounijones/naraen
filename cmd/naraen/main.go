@@ -64,8 +64,11 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 
 	store := datastore.NewStore(cfg.SnapshotMaxAge, datastore.DefaultLimits)
 	if cfg.SnapshotFile != "" {
-		if err := loadSnapshot(store, cfg.SnapshotFile); err != nil {
+		if err := loadSnapshot(store, cfg.SnapshotFile, cfg.Dev); err != nil {
 			return err
+		}
+		if !cfg.Dev {
+			log.WarnContext(ctx, "datastore loaded from a snapshot file: no provider keeps it in step with GitHub", "file", cfg.SnapshotFile)
 		}
 	}
 	// Until a provider is wired in, the server stays not-ready and refuses all
@@ -182,7 +185,17 @@ func loadTokenSigner(cfg config.Config, random io.Reader) (*token.Signer, error)
 	return s, nil
 }
 
-func loadSnapshot(store *datastore.Store, path string) error {
+// devKeyFingerprints are the development keys committed in
+// test/testdata/devkeys. Their private halves are public, so a snapshot that
+// lists either is refused outside dev mode: pointing a production server at
+// the dev snapshot must not hand upload rights to anyone who reads the repo.
+// TestDevSnapshotFixture keeps this list in step with the key files.
+var devKeyFingerprints = []string{
+	"SHA256:3gzqoh0HmPR7wXovKf0R5jO41Aoyu2f06LgDx8LQY8s", // writer
+	"SHA256:nY3kj39hB+G2rfiakn6x9jIZiid3G3onHOpaJTzBVvo", // reader
+}
+
+func loadSnapshot(store *datastore.Store, path string, dev bool) error {
 	// Freshness counts from before the file is read, as for any sync.
 	start := store.StartSync()
 	f, err := os.Open(path) // #nosec G304 -- operator-supplied path
@@ -193,6 +206,13 @@ func loadSnapshot(store *datastore.Store, path string) error {
 	snap, err := datastore.ParseSnapshot(f)
 	if err != nil {
 		return err
+	}
+	if !dev {
+		for _, fp := range devKeyFingerprints {
+			if _, ok := snap.KeyHolder(fp); ok {
+				return fmt.Errorf("snapshot file: lists the public development key %s, which is accepted only when NARAEN_DEV=true", fp)
+			}
+		}
 	}
 	return store.Swap(start, snap)
 }

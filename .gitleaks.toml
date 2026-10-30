@@ -3,8 +3,11 @@ title = "naraen"
 [extend]
 useDefault = true
 
+# Only the committed development keys are allowed through. They are public on
+# purpose (test/testdata/devkeys/README.md) and refused outside dev mode. Any
+# other secret, in any fixture folder, must still fail the scan.
 [allowlist]
-description = "Test fixtures"
+description = "Public development SSH keys"
 paths = [
-  '''(^|/)testdata/''',
+  '''^test/testdata/devkeys/(reader|writer)$''',
 ]

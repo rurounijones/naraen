@@ -117,7 +117,7 @@ Configuration is by environment variable. Secrets are never put in the environme
 - `NARAEN_SSH_HOST_KEY_FILE`: the SSH host private key.
 - `NARAEN_TLS_CERT_FILE` and `NARAEN_TLS_KEY_FILE`: the TLS certificate and key.
 - `NARAEN_PUBLIC_URL`: the HTTPS origin clients reach the Batch API at, such as `https://lfs.example.com`. `git-lfs-authenticate` returns it with the repo path appended. Only an origin is accepted: no path, query, fragment or userinfo.
-- `NARAEN_DEV=true`: allow any of the above to be missing and use ephemeral key material instead, with the public URL defaulting to `https://localhost:<HTTPS port>`. Without it the server refuses to start unless all are set.
+- `NARAEN_DEV=true`: allow any of the above to be missing and use ephemeral key material instead, with the public URL defaulting to `https://localhost:<HTTPS port>`. Without it the server refuses to start unless all are set. A snapshot file that lists the public development keys is refused unless `NARAEN_DEV=true`.
 - `NARAEN_SSH_CONN_BURST` and `NARAEN_SSH_CONN_INTERVAL`: the per-source SSH connection rate limit, by default a burst of 20 and then one connection per 200ms. A source is an IPv4 address or an IPv6 /64. Raise them where many clients share one address, such as an office NAT or CI egress.
 - `NARAEN_SSH_ADDR`, `NARAEN_HTTPS_ADDR`, `NARAEN_SNAPSHOT_FILE`, `NARAEN_SNAPSHOT_MAX_AGE`.
 

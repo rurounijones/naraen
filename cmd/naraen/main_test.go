@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -213,11 +214,17 @@ func TestRunServesUntilCancelled(t *testing.T) {
 }
 
 // With every piece of key material configured, no randomness is needed and no
-// development warning is logged.
+// development warning is logged, and a snapshot file used outside dev mode is
+// called out.
 func TestRunServesWithConfiguredKeyMaterial(t *testing.T) {
-	logs := serveUntilCancelled(t, prodEnv(t), iotest.ErrReader(errors.New("must not be used")))
+	e := prodEnv(t)
+	e["NARAEN_SNAPSHOT_FILE"] = snapshotFile(t)
+	logs := serveUntilCancelled(t, e, iotest.ErrReader(errors.New("must not be used")))
 	if strings.Contains(logs, "development mode") {
 		t.Errorf("production run logged dev mode: %s", logs)
+	}
+	if !strings.Contains(logs, "datastore loaded from a snapshot file") {
+		t.Errorf("snapshot file outside dev mode not called out: %s", logs)
 	}
 }
 
@@ -244,16 +251,16 @@ func TestMainExits(t *testing.T) {
 
 func TestLoadSnapshot(t *testing.T) {
 	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
-	if err := loadSnapshot(store, snapshotFile(t)); err != nil {
+	if err := loadSnapshot(store, snapshotFile(t), false); err != nil {
 		t.Fatalf("valid snapshot: %v", err)
 	}
 	if !store.Ready() {
 		t.Fatal("store not ready after loading a snapshot")
 	}
-	if err := loadSnapshot(store, filepath.Join(t.TempDir(), "nope.json")); err == nil {
+	if err := loadSnapshot(store, filepath.Join(t.TempDir(), "nope.json"), true); err == nil {
 		t.Fatal("missing file accepted")
 	}
-	if err := loadSnapshot(store, write(t, "bad.json", []byte("{"))); err == nil {
+	if err := loadSnapshot(store, write(t, "bad.json", []byte("{")), true); err == nil {
 		t.Fatal("malformed snapshot accepted")
 	}
 }
@@ -305,9 +312,18 @@ func TestLoadTokenSigner(t *testing.T) {
 // it is named after, so the README's local walkthrough keeps working.
 func TestDevSnapshotFixture(t *testing.T) {
 	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
-	if err := loadSnapshot(store, filepath.Join("..", "..", "test", "testdata", "snapshot.json")); err != nil {
+	devSnapshot := filepath.Join("..", "..", "test", "testdata", "snapshot.json")
+	// The public dev keys are refused outside dev mode, and nothing is loaded.
+	if err := loadSnapshot(store, devSnapshot, false); err == nil || !strings.Contains(err.Error(), "development key") {
+		t.Fatalf("dev snapshot outside dev mode: %v", err)
+	}
+	if store.Ready() {
+		t.Fatal("refused snapshot was loaded")
+	}
+	if err := loadSnapshot(store, devSnapshot, true); err != nil {
 		t.Fatal(err)
 	}
+	var fingerprints []string
 	a := authz.New(store)
 	for name, ops := range map[string][]lfs.Operation{
 		"writer": {lfs.Download, lfs.Upload},
@@ -321,6 +337,7 @@ func TestDevSnapshotFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		fingerprints = append(fingerprints, ssh.FingerprintSHA256(pub))
 		id, err := a.IdentityForKey(ssh.FingerprintSHA256(pub))
 		if err != nil || id.ID != name {
 			t.Fatalf("%s.pub authenticates as %q, %v", name, id.ID, err)
@@ -333,6 +350,12 @@ func TestDevSnapshotFixture(t *testing.T) {
 	}
 	if _, err := a.Authorize("reader", "example/repo", lfs.Upload); err == nil {
 		t.Error("reader may upload")
+	}
+	// The refusal list must name exactly the committed keys.
+	slices.Sort(fingerprints)
+	want := slices.Sorted(slices.Values(devKeyFingerprints))
+	if !slices.Equal(fingerprints, want) {
+		t.Errorf("devKeyFingerprints = %v, key files hold %v", want, fingerprints)
 	}
 }
 

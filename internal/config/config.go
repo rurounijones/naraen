@@ -53,6 +53,12 @@ type Config struct {
 	// OTLPHeaders are sent with every export, typically the ingestion
 	// credential, so they come from a file, never the environment.
 	OTLPHeaders map[string]string
+	// Bucket is the S3 bucket holding every repo's objects, each repo under a
+	// top-level folder named by its ID. It is required unless Dev.
+	Bucket string
+	// S3Endpoint replaces the AWS S3 endpoint, for S3-compatible storage such
+	// as SeaweedFS in development and tests. Empty means AWS.
+	S3Endpoint string
 }
 
 // Getenv abstracts os.Getenv for tests.
@@ -120,7 +126,7 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 		}
 		c.SSHConnInterval = d
 	}
-	if c.OTLPEndpoint, err = otlpEndpoint(getenv("NARAEN_OTLP_ENDPOINT")); err != nil {
+	if c.OTLPEndpoint, err = endpoint("NARAEN_OTLP_ENDPOINT", getenv("NARAEN_OTLP_ENDPOINT")); err != nil {
 		return Config{}, err
 	}
 	if path := getenv("NARAEN_OTLP_HEADERS_FILE"); path != "" {
@@ -132,21 +138,47 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if c.S3Endpoint, err = endpoint("NARAEN_S3_ENDPOINT", getenv("NARAEN_S3_ENDPOINT")); err != nil {
+		return Config{}, err
+	}
+	if c.Bucket = getenv("NARAEN_S3_BUCKET"); c.Bucket != "" && !bucketName(c.Bucket) {
+		return Config{}, fmt.Errorf("config: NARAEN_S3_BUCKET must be an S3 bucket name without dots: %q", c.Bucket)
+	}
+	if !c.Dev && c.Bucket == "" {
+		return Config{}, errors.New("config: NARAEN_S3_BUCKET is required unless NARAEN_DEV=true")
+	}
 	return c, nil
 }
 
-// otlpEndpoint validates NARAEN_OTLP_ENDPOINT. Exports carry the ingestion
-// credential and identify users and repos, so they go over https, except to a
-// loopback address, where a local collector or a test receiver listens and
-// nothing crosses the network. Empty disables export.
-func otlpEndpoint(v string) (string, error) {
+// bucketName accepts S3 bucket names without dots: 3 to 63 lowercase letters,
+// digits and hyphens, starting and ending with a letter or digit. Dots are
+// legal in S3 but break TLS for virtual-hosted URLs, so they are refused.
+func bucketName(s string) bool {
+	if len(s) < 3 || len(s) > 63 || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// endpoint validates the URL of a service the server calls, named by the
+// variable name. Traffic to it carries credentials (the OTLP ingestion
+// credential, S3 request signatures) and names users and repos, so it goes
+// over https, except to a loopback address, where a local collector, a
+// development S3 or a test receiver listens and nothing crosses the network.
+// Empty means the default: no export, or AWS.
+func endpoint(name, v string) (string, error) {
 	if v == "" {
 		return "", nil
 	}
 	u, err := url.Parse(v)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" ||
 		(u.Scheme != "https" && (u.Scheme != "http" || !loopback(u.Hostname()))) {
-		return "", fmt.Errorf("config: NARAEN_OTLP_ENDPOINT must be an https URL, or http to a loopback address: %q", v)
+		return "", fmt.Errorf("config: %s must be an https URL, or http to a loopback address: %q", name, v)
 	}
 	return strings.TrimSuffix(v, "/"), nil
 }

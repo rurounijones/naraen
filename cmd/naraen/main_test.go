@@ -69,6 +69,7 @@ func write(t *testing.T, name string, data []byte) string {
 // prodEnv runs with key material from files, as production does.
 func prodEnv(t *testing.T) map[string]string {
 	t.Helper()
+	isolateAWS(t)
 	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +95,19 @@ func prodEnv(t *testing.T) map[string]string {
 		"NARAEN_TLS_KEY_FILE":      write(t, "key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
 		"NARAEN_PUBLIC_URL":        "https://lfs.example.com",
 		"NARAEN_OTLP_ENDPOINT":     otlpReceiver(t).URL,
+		"NARAEN_S3_BUCKET":         "acme-lfs",
+		"NARAEN_S3_ENDPOINT":       "http://127.0.0.1:1",
 	}
+}
+
+// isolateAWS points the AWS SDK at empty config files and a fixed region, so a
+// test never reads the developer's ~/.aws or asks EC2 instance metadata.
+func isolateAWS(t *testing.T) {
+	t.Helper()
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_CONFIG_FILE", write(t, "aws-config", nil))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", write(t, "aws-credentials", nil))
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 }
 
 // receiver counts OTLP pushes by path, so a test can tell that metrics and
@@ -240,8 +253,12 @@ func serveUntilCancelled(t *testing.T, e map[string]string, random io.Reader) st
 func TestRunServesUntilCancelled(t *testing.T) {
 	e := devEnv()
 	e["NARAEN_SNAPSHOT_FILE"] = snapshotFile(t)
-	if logs := serveUntilCancelled(t, e, rand.Reader); !strings.Contains(logs, "development mode") {
+	logs := serveUntilCancelled(t, e, rand.Reader)
+	if !strings.Contains(logs, "development mode") {
 		t.Errorf("dev mode not announced: %s", logs)
+	}
+	if !strings.Contains(logs, "no bucket configured") {
+		t.Errorf("missing storage not announced: %s", logs)
 	}
 }
 
@@ -448,5 +465,30 @@ func TestSSHLimits(t *testing.T) {
 	want.ConnBurst, want.ConnInterval = 100, time.Millisecond
 	if got != want {
 		t.Errorf("overrides: %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadStorage(t *testing.T) {
+	isolateAWS(t)
+	if s, err := loadStorage(context.Background(), "http://127.0.0.1:8333", "acme-lfs"); err != nil || s == nil {
+		t.Fatalf("storage: %v, %v", s, err)
+	}
+	t.Setenv("AWS_REGION", "")
+	if _, err := loadStorage(context.Background(), "", "acme-lfs"); err == nil || !strings.Contains(err.Error(), "AWS_REGION") {
+		t.Errorf("no region: %v", err)
+	}
+	// A setting the SDK cannot parse stops startup.
+	t.Setenv("AWS_MAX_ATTEMPTS", "many")
+	if _, err := loadStorage(context.Background(), "", "acme-lfs"); err == nil {
+		t.Error("unparseable AWS setting accepted")
+	}
+}
+
+// A production server whose storage cannot be set up does not start.
+func TestRunStorageError(t *testing.T) {
+	e := prodEnv(t)
+	t.Setenv("AWS_REGION", "")
+	if err := run(context.Background(), env(e), rand.Reader, discard()); err == nil || !strings.Contains(err.Error(), "s3") {
+		t.Fatalf("err = %v", err)
 	}
 }

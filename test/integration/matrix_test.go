@@ -397,6 +397,9 @@ func startServer(t *testing.T) *env {
 		"NARAEN_SSH_HOST_KEY_FILE=" + hostKey,
 		"NARAEN_TLS_CERT_FILE=" + tlsCert,
 		"NARAEN_TLS_KEY_FILE=" + tlsKey,
+		"NARAEN_S3_BUCKET=acme-lfs",
+		"AWS_REGION=us-east-1",
+		"AWS_EC2_METADATA_DISABLED=true",
 	}
 	logs := &syncBuffer{}
 	e.logs = logs

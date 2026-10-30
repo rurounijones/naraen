@@ -29,6 +29,7 @@ func prod() map[string]string {
 		"NARAEN_TLS_KEY_FILE":      "key",
 		"NARAEN_PUBLIC_URL":        "https://lfs.example.com",
 		"NARAEN_OTLP_ENDPOINT":     "https://otel.example.com",
+		"NARAEN_S3_BUCKET":         "acme-lfs",
 	}
 }
 
@@ -311,5 +312,61 @@ func TestOTLPHeaders(t *testing.T) {
 	e["NARAEN_OTLP_HEADERS_FILE"] = "missing"
 	if _, err := Load(env(e), keyFile); err == nil {
 		t.Error("missing headers file accepted")
+	}
+}
+
+func TestBucket(t *testing.T) {
+	c, err := Load(env(prod()), keyFile)
+	if err != nil || c.Bucket != "acme-lfs" {
+		t.Fatalf("bucket = %q, %v", c.Bucket, err)
+	}
+	e := prod()
+	e["NARAEN_S3_BUCKET"] = strings.Repeat("b", 63)
+	if _, err := Load(env(e), keyFile); err != nil {
+		t.Errorf("longest name: %v", err)
+	}
+	e["NARAEN_S3_BUCKET"] = "a-9"
+	if c, err := Load(env(e), keyFile); err != nil || c.Bucket != "a-9" {
+		t.Errorf("shortest name: %q, %v", c.Bucket, err)
+	}
+	for name, bucket := range map[string]string{
+		"too short":      "ab",
+		"too long":       strings.Repeat("b", 64),
+		"leading hyphen": "-abc",
+		"trailing hyph":  "abc-",
+		"upper case":     "Abc",
+		"dot":            "a.bc",
+		"underscore":     "a_bc",
+		"below digits":   "a/bc",
+		"above digits":   "a:bc",
+		"below lower":    "a`bc",
+		"above lower":    "a{bc",
+	} {
+		e["NARAEN_S3_BUCKET"] = bucket
+		if _, err := Load(env(e), keyFile); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	delete(e, "NARAEN_S3_BUCKET")
+	if _, err := Load(env(e), keyFile); err == nil {
+		t.Error("started without a bucket outside dev mode")
+	}
+	if c, err := Load(env(map[string]string{"NARAEN_DEV": "true"}), keyFile); err != nil || c.Bucket != "" {
+		t.Errorf("dev without a bucket = %q, %v", c.Bucket, err)
+	}
+}
+
+func TestS3Endpoint(t *testing.T) {
+	e := prod()
+	e["NARAEN_S3_ENDPOINT"] = "http://127.0.0.1:8333/"
+	if c, err := Load(env(e), keyFile); err != nil || c.S3Endpoint != "http://127.0.0.1:8333" {
+		t.Errorf("endpoint = %q, %v", c.S3Endpoint, err)
+	}
+	e["NARAEN_S3_ENDPOINT"] = "http://s3.example.com"
+	if _, err := Load(env(e), keyFile); err == nil || !strings.Contains(err.Error(), "NARAEN_S3_ENDPOINT") {
+		t.Errorf("cleartext endpoint over the network: %v", err)
+	}
+	if c, err := Load(env(prod()), keyFile); err != nil || c.S3Endpoint != "" {
+		t.Errorf("default = %q, %v", c.S3Endpoint, err)
 	}
 }

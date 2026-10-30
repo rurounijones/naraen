@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"go.opentelemetry.io/otel"
 	"golang.org/x/crypto/ssh"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/sshd"
+	"github.com/rurounijones/naraen/internal/storage/s3store"
 	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/token"
 )
@@ -107,13 +109,26 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	if err != nil {
 		return err
 	}
-	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batch.Unconfigured()), httpapi.TLSConfig(cert))
+	authorizer := authz.New(store)
+	batchHandler := batch.Unconfigured()
+	if cfg.Bucket != "" {
+		objects, err := loadStorage(ctx, cfg.S3Endpoint, cfg.Bucket)
+		if err != nil {
+			return err
+		}
+		batchHandler = &batch.Handler{
+			Store: store, Authz: authorizer, Tokens: tokens,
+			Objects: objects, Rec: rec, Log: log, Rand: rand.Reader,
+		}
+	} else {
+		log.WarnContext(ctx, "development mode: no bucket configured (NARAEN_S3_BUCKET), so the Batch API answers 503")
+	}
+	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batchHandler), httpapi.TLSConfig(cert))
 
 	sshLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.SSHAddr)
 	if err != nil {
 		return fmt.Errorf("ssh listen: %w", err)
 	}
-	authorizer := authz.New(store)
 	sshCfg := sshd.NewServerConfig(hostKey, authorizer)
 	authenticate := sshd.NewAuthenticator(authorizer, tokens, cfg.PublicURL, rec)
 
@@ -244,4 +259,20 @@ func flushTelemetry(tel *telemetry.Providers, log *slog.Logger) {
 	if err := tel.Shutdown(ctx); err != nil {
 		log.WarnContext(ctx, "telemetry flush failed", "error", err)
 	}
+}
+
+// loadStorage builds the S3 client from the SDK's default chain: the instance
+// role on EC2, or a shared credentials file named by
+// AWS_SHARED_CREDENTIALS_FILE elsewhere, so no secret is read from the
+// environment. The region must be set explicitly: guessing one would sign
+// links for the wrong endpoint.
+func loadStorage(ctx context.Context, endpoint, bucket string) (*s3store.Store, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("s3: %w", err)
+	}
+	if awsCfg.Region == "" {
+		return nil, errors.New("s3: AWS_REGION is not set")
+	}
+	return s3store.New(awsCfg, endpoint, bucket), nil
 }

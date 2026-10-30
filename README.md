@@ -108,6 +108,8 @@ ssh -p 2222 -i test/testdata/devkeys/writer -o IdentitiesOnly=yes git@localhost 
 
 The host key is ephemeral in development mode, so ssh asks you to trust it on every restart.
 
+The href in the answer comes from `NARAEN_PUBLIC_URL`, which defaults to localhost in development mode; set it to the name other machines reach the server by before trying from one.
+
 To use it from a repository, set `lfs.url` to `ssh://git@localhost:2222/example/repo`. Point `GIT_SSH_COMMAND` at the key, for example `ssh -i test/testdata/devkeys/writer -o IdentitiesOnly=yes`. `git lfs push` then authenticates and stops at the Batch API, which is not built yet.
 
 ### Configuration

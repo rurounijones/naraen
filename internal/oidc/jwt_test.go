@@ -199,3 +199,53 @@ func FuzzVerifySignature(f *testing.F) {
 		_ = unverifiedIssuer(tok)
 	})
 }
+
+// exactLength returns a token signed by s that is exactly maxToken bytes.
+func exactLength(t *testing.T, s *signer) string {
+	t.Helper()
+	for pad := maxToken*3/4 - 400; pad < maxToken*3/4; pad++ {
+		claims := map[string]any{"iss": "https://issuer.test", "pad": strings.Repeat("x", pad)}
+		if tok := s.sign(t, nil, claims); len(tok) == maxToken {
+			return tok
+		}
+	}
+	t.Fatal("no padding gives an exact-length token")
+	return ""
+}
+
+// The size cap admits a token of exactly maxToken bytes.
+func TestTokenAtSizeLimit(t *testing.T) {
+	s := newES256(t, "ec1")
+	tok := exactLength(t, s)
+	if _, err := VerifySignature(tok, jwks(s.jwk())); err != nil {
+		t.Errorf("token at the limit: %v", err)
+	}
+	if got := unverifiedIssuer(tok); got != "https://issuer.test" {
+		t.Errorf("issuer of a token at the limit = %q", got)
+	}
+}
+
+// RSA keys are held to their bounds exactly: 2048 bits and an odd exponent
+// of at least 3 that fits in four bytes.
+func TestRSAKeyBounds(t *testing.T) {
+	n := new(big.Int).Lsh(big.NewInt(1), minRSABits-1) // exactly 2048 bits
+	short := new(big.Int).Lsh(big.NewInt(1), minRSABits-2)
+	key := func(n *big.Int, e []byte) jwk {
+		return jwk{Kty: "RSA", N: b64.EncodeToString(n.Bytes()), E: b64.EncodeToString(e)}
+	}
+	for name, tt := range map[string]struct {
+		k    jwk
+		want bool
+	}{
+		"2048 bits, e=3":     {key(n, []byte{3}), true},
+		"four-byte exponent": {key(n, []byte{1, 0, 0, 1}), true},
+		"2047 bits":          {key(short, []byte{3}), false},
+		"e=2":                {key(n, []byte{2}), false},
+		"e=4, even":          {key(n, []byte{4}), false},
+		"five-byte exponent": {key(n, []byte{1, 0, 0, 0, 1}), false},
+	} {
+		if _, ok := rsaKey(tt.k); ok != tt.want {
+			t.Errorf("%s: ok = %v, want %v", name, ok, tt.want)
+		}
+	}
+}

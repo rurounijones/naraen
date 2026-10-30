@@ -175,6 +175,10 @@ func TestExchangeRefusals(t *testing.T) {
 			if w.Code != tt.status {
 				t.Fatalf("status %d, want %d: %s", w.Code, tt.status, w.Body)
 			}
+			msg := map[int]string{401: `{"message":"unauthorized"}`, 403: `{"message":"forbidden"}`}[tt.status]
+			if strings.TrimSpace(w.Body.String()) != msg {
+				t.Errorf("body %s, want %s", w.Body, msg)
+			}
 			if !strings.Contains(f.logs.String(), `"reason":"`+tt.reason+`"`) {
 				t.Errorf("log lacks reason %s: %s", tt.reason, f.logs.String())
 			}

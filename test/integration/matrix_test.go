@@ -104,7 +104,7 @@ func TestAccessMatrix(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				e.checkToken(t, out, id.name, op)
+				e.checkToken(t, out, id.name, op, "acme/assets")
 			})
 		}
 	}
@@ -112,13 +112,44 @@ func TestAccessMatrix(t *testing.T) {
 
 // git-lfs tries git-lfs-transfer first. The server says plainly that it is
 // unsupported, rather than refusing, so the client falls back to
-// git-lfs-authenticate at once.
+// git-lfs-authenticate at once. The answer is the same for an identity with
+// no access, so it reveals nothing about grants.
 func TestTransferUnsupported(t *testing.T) {
 	needSSH(t)
 	e := startServer(t)
-	_, err := e.ssh(t, "admin", transferSource, "git-lfs-transfer acme/assets upload")
-	if err == nil || !strings.Contains(err.Error(), "git-lfs-transfer is not supported") {
-		t.Fatalf("err = %v", err)
+	for _, as := range []string{"admin", "member-without-grant"} {
+		_, err := e.ssh(t, as, transferSource, "git-lfs-transfer acme/assets upload")
+		if err == nil || !strings.Contains(err.Error(), "git-lfs-transfer is not supported") {
+			t.Fatalf("%s: err = %v", as, err)
+		}
+	}
+}
+
+// Real clients spell the path in several ways. Each normalized spelling, and
+// an alias left by a rename, reaches repo 1; the href keeps the normalized
+// spelling the client used.
+func TestPathVariants(t *testing.T) {
+	needSSH(t)
+	e := startServer(t)
+	for raw, path := range map[string]string{
+		"ACME/Assets":     "acme/assets",
+		"acme/assets.git": "acme/assets",
+		"/acme/assets":    "acme/assets",
+		"acme/old-assets": "acme/old-assets",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			out, err := e.ssh(t, "writer", pathSource, "git-lfs-authenticate "+raw+" upload")
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.checkToken(t, out, "writer", lfs.Upload, path)
+		})
+	}
+	// A path trick does not parse, so the server rejects the exec request
+	// itself, as for any unknown command.
+	_, err := e.ssh(t, "writer", pathSource, "git-lfs-authenticate acme/../acme/assets upload")
+	if err == nil || !strings.Contains(err.Error(), "exec request failed") {
+		t.Fatalf("path trick: err = %v", err)
 	}
 }
 
@@ -133,7 +164,7 @@ func TestAuditEventsExported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims := e.checkToken(t, out, "writer", lfs.Upload)
+	claims := e.checkToken(t, out, "writer", lfs.Upload, "acme/assets")
 	_, err = e.ssh(t, "reader", auditSource, "git-lfs-authenticate acme/assets upload")
 	checkDenied(t, err)
 	_, err = e.ssh(t, "unknown-key", auditSource, "git-lfs-authenticate acme/assets download")
@@ -190,6 +221,7 @@ func needSSH(t *testing.T) {
 // the loopback interface.
 const (
 	transferSource = "127.0.0.2"
+	pathSource     = "127.0.0.3"
 	auditSource    = "127.0.0.4"
 )
 
@@ -215,10 +247,10 @@ func checkDenied(t *testing.T, err error) {
 }
 
 // checkToken asserts an allowed cell's git-lfs-authenticate response: the
-// Batch API address for the repo, a bearer token that verifies for exactly
-// this identity, repo ID and operation, and the token's 15 minute lifetime.
-// It returns the token's claims.
-func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation) token.Claims {
+// Batch API address for path, a bearer token that verifies for exactly this
+// identity, repo ID and operation, and the token's 15 minute lifetime. It
+// returns the token's claims.
+func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation, path string) token.Claims {
 	t.Helper()
 	var resp struct {
 		Href      string            `json:"href"`
@@ -228,7 +260,7 @@ func (e *env) checkToken(t *testing.T, out, as string, op lfs.Operation) token.C
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatalf("response %q: %v", out, err)
 	}
-	if resp.Href != e.publicURL+"/acme/assets" || resp.ExpiresIn != 900 || len(resp.Header) != 1 {
+	if resp.Href != e.publicURL+"/"+path || resp.ExpiresIn != 900 || len(resp.Header) != 1 {
 		t.Errorf("response = %+v", resp)
 	}
 	tok, ok := strings.CutPrefix(resp.Header["Authorization"], "Bearer ")
@@ -274,7 +306,7 @@ func startServer(t *testing.T) *env {
 	}
 
 	data := datastore.Data{Repos: []datastore.Repo{
-		{ID: "1", Path: "acme/assets"},
+		{ID: "1", Path: "acme/assets", Aliases: []string{"acme/old-assets"}},
 		{ID: "2", Path: "acme/other"},
 	}}
 	for _, id := range matrix {

@@ -20,16 +20,31 @@ rules:
     severity: ERROR
     message: Pre-signed URLs and bearer tokens are credentials and must never be logged.
     # $LOG matches both the slog package and a *slog.Logger value, so the
-    # package functions and the Logger methods the code actually calls are
-    # covered. Any argument counts, so a credential is caught as a key or
-    # as a value.
+    # package functions, the Logger methods and the fields fixed with With are
+    # all covered. Two shapes count as a credential: an attribute key that
+    # names one, and a value expression (not a string literal) that names one.
+    # The message itself is not checked, so an event may be called "token
+    # issued" without a suppression.
     patterns:
-      - pattern: $LOG.$LEVEL(..., $ARG, ...)
+      - pattern-either:
+          - patterns:
+              - pattern: $LOG.$LEVEL(..., "$KEY", $VAL, ...)
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: '(?i)^(token|.*_token|bearer|authorization|.*url|.*href|.*signature|x-amz-.*|.*presign.*)$'
+          - patterns:
+              - pattern: $LOG.$LEVEL(..., $VAL, ...)
+              - metavariable-pattern:
+                  metavariable: $VAL
+                  patterns:
+                    - pattern-not: '"..."'
+              # PublicURL is exempt: config accepts only an https origin for
+              # it, so it can never hold a pre-signed URL or a token.
+              - metavariable-regex:
+                  metavariable: $VAL
+                  regex: '(?i)^(?!.*\bpublicurl\b).*(presign|href|url|\btok\b|token|authorization|bearer).*'
       - metavariable-regex:
           metavariable: $LEVEL
-          regex: '^((Debug|Info|Warn|Error)(Context)?|Log|LogAttrs)$'
-      - metavariable-regex:
-          metavariable: $ARG
-          regex: '(?i).*(presign|href|url|token|authorization).*'
+          regex: '^((Debug|Info|Warn|Error)(Context)?|Log|LogAttrs|With)$'
     paths:
       exclude: ["*_test.go"]

@@ -59,7 +59,7 @@ sequenceDiagram
 | Wrong-repo access | Strict path normalization, resolution to repo ID, tokens bound to repo and operation, OID validation |
 | Stale access | Periodic full sync, tokens re-checked against the current snapshot on every request, requests refused when the snapshot exceeds its maximum age |
 | Provider bug | Snapshots validated before swap; unusual drops, additions or level raises rejected until an operator approves; webhook deltas can only remove access |
-| Leaked URL | 15-minute expiry; full URLs never logged |
+| Leaked URL | 15-minute expiry; full URLs and tokens never logged (a Semgrep rule with its own test cases) |
 | Man in the middle | TLS 1.3 minimum; modern-only SSH KEX, ciphers and MACs |
 
 ## Testing and quality gates

@@ -86,7 +86,8 @@ tasks:
     desc: Static security analysis
     cmds:
       - scripts/tool.sh gosec -exclude-generated ./...
-      - semgrep scan --error --metrics=off --config .semgrep --config p/golang --config p/jwt --config p/secrets --config p/security-audit .
+      - semgrep --test --metrics=off --config .semgrep/naraen.yml .semgrep/naraen.go
+      - semgrep scan --error --metrics=off --exclude .semgrep --config .semgrep --config p/golang --config p/jwt --config p/secrets --config p/security-audit .
 
   secrets:
     desc: Secret scanning of the working tree and history

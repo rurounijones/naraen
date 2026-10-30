@@ -101,8 +101,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	errc := make(chan error, 2)
 	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), authenticate, log) }()
 	go func() { errc <- httpSrv.ListenAndServeTLS("", "") }()
-	// The public URL is the server's own origin, not a pre-signed URL.
-	log.InfoContext(ctx, "listening", "version", version, "ssh", cfg.SSHAddr, "https", cfg.HTTPSAddr, "public_url", cfg.PublicURL) // nosemgrep: naraen-log-presigned-url
+	log.InfoContext(ctx, "listening", "version", version, "ssh", cfg.SSHAddr, "https", cfg.HTTPSAddr, "public_origin", cfg.PublicURL)
 
 	var runErr error
 	select {

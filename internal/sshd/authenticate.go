@@ -58,8 +58,8 @@ func (a *Authenticator) Handle(ctx context.Context, identityID string, cmd Comma
 		Header:    map[string]string{"Authorization": "Bearer " + tok},
 		ExpiresIn: int64(a.tokens.TTL().Seconds()),
 	})
-	// An audit record of the decision. "token" is only the event name: the
-	// token itself and the href are never logged.
-	a.log.InfoContext(ctx, "token issued", "identity", identityID, "repo_id", repoID, "operation", cmd.Op) // nosemgrep: naraen-log-presigned-url
+	// An audit record of the decision. The token itself and the href are
+	// never logged.
+	a.log.InfoContext(ctx, "token issued", "identity", identityID, "repo_id", repoID, "operation", cmd.Op)
 	return append(out, '\n'), nil
 }

@@ -15,3 +15,5 @@ unleash:
     efficacy: 99.99
   exclude-files:
     - "_test\\.go$"
+    # Semgrep rule test cases, never built.
+    - "^\\.semgrep/"

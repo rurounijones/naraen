@@ -46,6 +46,9 @@ type Recorder struct {
 	authFailures  metric.Int64Counter
 	tokensIssued  metric.Int64Counter
 	connsRejected metric.Int64Counter
+	linksIssued   metric.Int64Counter
+	bytesReq      metric.Int64Counter
+	objectSize    metric.Int64Histogram
 }
 
 // NewRecorder creates the instruments on mp.
@@ -63,7 +66,19 @@ func NewRecorder(mp metric.MeterProvider) *Recorder {
 	connsRejected, _ := m.Int64Counter(MetricSSHConnsRejected,
 		metric.WithUnit("{connection}"),
 		metric.WithDescription("SSH connections closed before the handshake by a rate or concurrency limit"))
-	return &Recorder{authFailures: authFailures, tokensIssued: tokensIssued, connsRejected: connsRejected}
+	linksIssued, _ := m.Int64Counter(MetricLinksIssued,
+		metric.WithUnit("{object}"),
+		metric.WithDescription("Objects answered by the Batch API, by outcome: a link issued, or why not"))
+	bytesReq, _ := m.Int64Counter(MetricBytesRequested,
+		metric.WithUnit("By"),
+		metric.WithDescription("Bytes covered by the links issued, the earliest signal of a transfer"))
+	objectSize, _ := m.Int64Histogram(MetricObjectSize,
+		metric.WithUnit("By"),
+		metric.WithDescription("Size of each object a link was issued for"))
+	return &Recorder{
+		authFailures: authFailures, tokensIssued: tokensIssued, connsRejected: connsRejected,
+		linksIssued: linksIssued, bytesReq: bytesReq, objectSize: objectSize,
+	}
 }
 
 // AuthFailure counts one refusal. reason must come from a closed set (such as
@@ -87,4 +102,39 @@ func (r *Recorder) TokenIssued(ctx context.Context, op, repoID, user string) {
 // handshake. reason is "rate" or "concurrency".
 func (r *Recorder) ConnectionRejected(ctx context.Context, reason string) {
 	r.connsRejected.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelReason, reason)))
+}
+
+// Link outcomes of lfs.links.issued: a link was issued, or why not.
+const (
+	OutcomeIssued   = "issued"   // a link was issued
+	OutcomePresent  = "present"  // upload skipped: the object is already stored
+	OutcomeMissing  = "missing"  // download refused: the object is not stored
+	OutcomeMismatch = "mismatch" // download refused: the stored size differs
+	OutcomeError    = "error"    // storage failed
+)
+
+// LinkOutcome counts one object answered by the Batch API. outcome is one of
+// the Outcome constants.
+func (r *Recorder) LinkOutcome(ctx context.Context, op, repoID, user, outcome string) {
+	r.linksIssued.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(LabelOperation, op),
+		attribute.String(LabelRepo, repoID),
+		attribute.String(LabelUser, user),
+		attribute.String(LabelOutcome, outcome)))
+}
+
+// BytesRequested counts the bytes one Batch request was given links for.
+func (r *Recorder) BytesRequested(ctx context.Context, op, repoID, user string, n int64) {
+	r.bytesReq.Add(ctx, n, metric.WithAttributes(
+		attribute.String(LabelOperation, op),
+		attribute.String(LabelRepo, repoID),
+		attribute.String(LabelUser, user)))
+}
+
+// ObjectSize records the size of one object a link was issued for. The user
+// is left off: sizes are for capacity, not for watching people.
+func (r *Recorder) ObjectSize(ctx context.Context, op, repoID string, size int64) {
+	r.objectSize.Record(ctx, size, metric.WithAttributes(
+		attribute.String(LabelOperation, op),
+		attribute.String(LabelRepo, repoID)))
 }

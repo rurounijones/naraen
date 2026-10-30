@@ -69,6 +69,10 @@ func TestRecorder(t *testing.T) {
 	r.AuthFailure(ctx, "insufficient_grant", "person")
 	r.TokenIssued(ctx, "upload", "1", "alice")
 	r.ConnectionRejected(ctx, "rate")
+	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeIssued)
+	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeIssued)
+	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeMissing)
+	r.BytesRequested(ctx, "download", "1", "alice", 300)
 
 	got := collect(t, reader)
 	want := map[string]map[attribute.Distinct]int64{
@@ -78,6 +82,11 @@ func TestRecorder(t *testing.T) {
 		},
 		MetricTokensIssued:     {set(LabelOperation, "upload", LabelRepo, "1", LabelUser, "alice"): 1},
 		MetricSSHConnsRejected: {set(LabelReason, "rate"): 1},
+		MetricLinksIssued: {
+			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "issued"):  2,
+			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "missing"): 1,
+		},
+		MetricBytesRequested: {set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice"): 300},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("metrics = %v", got)
@@ -240,5 +249,29 @@ func TestErrorHandler(t *testing.T) {
 	ErrorHandler(slog.New(slog.NewJSONHandler(&buf, nil))).Handle(errors.New("collector unreachable"))
 	if out := buf.String(); !strings.Contains(out, `"msg":"telemetry export failed"`) || !strings.Contains(out, "collector unreachable") {
 		t.Fatalf("log = %s", out)
+	}
+}
+
+// Object sizes are a histogram labelled by operation and repo, never by user.
+func TestRecorderObjectSize(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	r := NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	r.ObjectSize(context.Background(), "upload", "1", 100)
+	r.ObjectSize(context.Background(), "upload", "1", 50)
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	if len(rm.ScopeMetrics) != 1 || len(rm.ScopeMetrics[0].Metrics) != 1 {
+		t.Fatalf("metrics = %+v", rm.ScopeMetrics)
+	}
+	m := rm.ScopeMetrics[0].Metrics[0]
+	h, ok := m.Data.(metricdata.Histogram[int64])
+	if m.Name != MetricObjectSize || !ok || len(h.DataPoints) != 1 {
+		t.Fatalf("%s is %T", m.Name, m.Data)
+	}
+	dp := h.DataPoints[0]
+	if dp.Count != 2 || dp.Sum != 150 || dp.Attributes.Equivalent() != set(LabelOperation, "upload", LabelRepo, "1") {
+		t.Errorf("point = %+v", dp)
 	}
 }

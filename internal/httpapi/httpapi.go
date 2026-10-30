@@ -1,5 +1,5 @@
-// Package httpapi is the HTTPS listener: health endpoints now, the Batch API,
-// CI token exchange and webhooks as they are built.
+// Package httpapi is the HTTPS listener: health endpoints and the Batch API,
+// with CI token exchange and webhooks to come.
 package httpapi
 
 import (
@@ -18,9 +18,15 @@ import (
 // Readier reports whether the datastore can serve decisions.
 type Readier interface{ Ready() bool }
 
-// Handler returns the HTTPS mux.
-func Handler(r Readier) http.Handler {
+// BatchPattern is the Batch API route. git-lfs-authenticate returns
+// https://<host>/{owner}/{repo} as the href and git-lfs appends the rest.
+const BatchPattern = "POST /{owner}/{repo}/objects/batch"
+
+// Handler returns the HTTPS mux. batch serves the Batch API; it is built by
+// the caller, so this package needs no storage or token code.
+func Handler(r Readier, batch http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle(BatchPattern, batch)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
+	"github.com/rurounijones/naraen/internal/batch"
 	"github.com/rurounijones/naraen/internal/config"
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
@@ -106,7 +107,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	if err != nil {
 		return err
 	}
-	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store), httpapi.TLSConfig(cert))
+	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batch.Unconfigured()), httpapi.TLSConfig(cert))
 
 	sshLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.SSHAddr)
 	if err != nil {

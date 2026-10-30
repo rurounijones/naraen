@@ -47,11 +47,26 @@ paths:
                       oid: {type: string, pattern: "^[0-9a-f]{64}$"}
                       size: {type: integer, minimum: 0, maximum: 5368709120}
       responses:
-        "200": {description: Per-object actions}
-        "401": {description: Missing or invalid token}
-        "403": {description: Not authorised}
-        "404": {description: Unknown repository}
-        "422": {description: Invalid request}
+        "200":
+          description: One entry per distinct object, in request order
+          content:
+            application/vnd.git-lfs+json:
+              schema: {$ref: "#/components/schemas/BatchResponse"}
+        "401":
+          description: >-
+            Missing or invalid token, a token minted for another repo or
+            operation, or an unknown repository. All look the same, so the
+            answer never reveals whether a repository exists.
+          content: {application/vnd.git-lfs+json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "403":
+          description: The token is valid but the current grant no longer allows the operation
+          content: {application/vnd.git-lfs+json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "422":
+          description: Invalid request body
+          content: {application/vnd.git-lfs+json: {schema: {$ref: "#/components/schemas/Error"}}}
+        "503":
+          description: Datastore not ready or stale, or storage not configured
+          content: {application/vnd.git-lfs+json: {schema: {$ref: "#/components/schemas/Error"}}}
   /webhooks/github:
     post:
       summary: GitHub webhook; body is authenticated by X-Hub-Signature-256
@@ -66,6 +81,46 @@ paths:
         "202": {description: Accepted}
         "401": {description: Bad signature}
 components:
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: {type: string}
+    Action:
+      type: object
+      required: [href, expires_at]
+      properties:
+        href: {type: string, description: "Pre-signed object-store URL, valid for 15 minutes"}
+        header: {type: object, additionalProperties: {type: string}, description: "Headers the client must send; upload links sign x-amz-checksum-sha256"}
+        expires_at: {type: string, format: date-time}
+    BatchResponse:
+      type: object
+      required: [transfer, objects]
+      properties:
+        transfer: {type: string, enum: [basic]}
+        hash_algo: {type: string, enum: [sha256]}
+        objects:
+          type: array
+          items:
+            type: object
+            required: [oid, size]
+            properties:
+              oid: {type: string}
+              size: {type: integer}
+              authenticated: {type: boolean, description: "True when actions carry their own authorization"}
+              actions:
+                type: object
+                description: "Absent for an upload of an object already stored"
+                properties:
+                  upload: {$ref: "#/components/schemas/Action"}
+                  download: {$ref: "#/components/schemas/Action"}
+              error:
+                type: object
+                description: "404 object not stored, 422 size differs, 500 storage failed"
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
   securitySchemes:
     bearer:
       type: http

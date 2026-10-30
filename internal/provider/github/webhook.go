@@ -52,28 +52,30 @@ func Narrowing(event string, body []byte) (datastore.Narrowing, error) {
 	if err := json.Unmarshal(body, &d); err != nil {
 		return datastore.Narrowing{}, ErrPayload
 	}
-	var n datastore.Narrowing
-	switch {
-	case event == "organization" && d.Action == "member_removed":
+	// Separate ifs rather than a tagless switch, so mutation testing can
+	// reach the event and action checks.
+	if event == "organization" && d.Action == "member_removed" {
 		if d.Membership.User.ID == 0 {
 			return datastore.Narrowing{}, ErrPayload
 		}
-		n.DeactivateIdentities = []string{PersonID(d.Membership.User.ID)}
-	case event == "member" && d.Action == "removed":
+		return datastore.Narrowing{DeactivateIdentities: []string{PersonID(d.Membership.User.ID)}}, nil
+	}
+	if event == "member" && d.Action == "removed" {
 		if d.Member.ID == 0 || d.Repository.ID == 0 {
 			return datastore.Narrowing{}, ErrPayload
 		}
-		n.DropGrants = []datastore.GrantRef{{
+		return datastore.Narrowing{DropGrants: []datastore.GrantRef{{
 			IdentityID: PersonID(d.Member.ID), RepoID: strconv.FormatInt(d.Repository.ID, 10),
-		}}
-	case event == "deploy_key" && d.Action == "deleted":
+		}}}, nil
+	}
+	if event == "deploy_key" && d.Action == "deleted" {
 		pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(d.Key.Key))
 		if err != nil {
 			return datastore.Narrowing{}, ErrPayload
 		}
-		n.RevokeKeys = []string{ssh.FingerprintSHA256(pub)}
+		return datastore.Narrowing{RevokeKeys: []string{ssh.FingerprintSHA256(pub)}}, nil
 	}
-	return n, nil
+	return datastore.Narrowing{}, nil
 }
 
 // empty reports whether n removes nothing.

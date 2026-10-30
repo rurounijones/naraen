@@ -86,13 +86,15 @@ func VerifySignature(tok, jwks string) ([]byte, error) {
 	return nil, ErrRejected
 }
 
-// verify checks sig over digest with key k under alg.
+// verify checks sig over digest with key k under alg. It is an if chain
+// rather than a tagless switch so mutation testing can reach the algorithm
+// and key-type checks.
 func verify(alg string, k jwk, digest, sig []byte) bool {
-	switch {
-	case alg == "RS256" && k.Kty == "RSA":
+	if alg == "RS256" && k.Kty == "RSA" {
 		pub, ok := rsaKey(k)
 		return ok && rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest, sig) == nil
-	case alg == "ES256" && k.Kty == "EC" && k.Crv == "P-256":
+	}
+	if alg == "ES256" && k.Kty == "EC" && k.Crv == "P-256" {
 		pub, ok := p256Key(k)
 		if !ok || len(sig) != 2*p256Coord {
 			return false
@@ -100,9 +102,8 @@ func verify(alg string, k jwk, digest, sig []byte) bool {
 		r := new(big.Int).SetBytes(sig[:p256Coord])
 		s := new(big.Int).SetBytes(sig[p256Coord:])
 		return ecdsa.Verify(pub, digest, r, s)
-	default:
-		return false
 	}
+	return false
 }
 
 func rsaKey(k jwk) (*rsa.PublicKey, bool) {

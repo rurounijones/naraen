@@ -192,19 +192,23 @@ func (h *Handler) object(ctx context.Context, repoID, requestID string, op lfs.O
 		resp.Error = &objectError{Code: http.StatusInternalServerError, Message: "storage unavailable"}
 		return resp, telemetry.OutcomeError
 	}
+	// An if chain rather than a tagless switch: mutation testing cannot see
+	// a switch's case conditions, and these are the access decisions.
 	var link storage.Link
-	switch {
-	case op == lfs.Upload && found:
-		return resp, telemetry.OutcomePresent
-	case op == lfs.Download && !found:
-		resp.Error = &objectError{Code: http.StatusNotFound, Message: "object not found"}
-		return resp, telemetry.OutcomeMissing
-	case op == lfs.Download && size != o.Size:
-		resp.Error = &objectError{Code: http.StatusUnprocessableEntity, Message: "size does not match the stored object"}
-		return resp, telemetry.OutcomeMismatch
-	case op == lfs.Upload:
+	if op == lfs.Upload {
+		if found {
+			return resp, telemetry.OutcomePresent
+		}
 		link, err = h.Objects.PresignPut(ctx, repoID, o.OID, o.Size, requestID)
-	default:
+	} else {
+		if !found {
+			resp.Error = &objectError{Code: http.StatusNotFound, Message: "object not found"}
+			return resp, telemetry.OutcomeMissing
+		}
+		if size != o.Size {
+			resp.Error = &objectError{Code: http.StatusUnprocessableEntity, Message: "size does not match the stored object"}
+			return resp, telemetry.OutcomeMismatch
+		}
 		link, err = h.Objects.PresignGet(ctx, repoID, o.OID, requestID)
 	}
 	if err != nil {

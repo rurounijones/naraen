@@ -88,7 +88,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // validAppJWT checks the App JWT the way GitHub does: RS256 with the App's
-// key, issued by the App, and not lasting more than ten minutes.
+// key, issued by the App, and lasting exactly ten minutes.
 func (f *fakeGitHub) validAppJWT(tok string) bool {
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
@@ -108,7 +108,9 @@ func (f *fakeGitHub) validAppJWT(tok string) bool {
 		Iat int64  `json:"iat"`
 		Exp int64  `json:"exp"`
 	}
-	return json.Unmarshal(raw, &c) == nil && c.Iss == "12345" && c.Exp-c.Iat <= 600
+	// Nine minutes ahead plus the minute iat is backdated by: GitHub's
+	// ten-minute maximum, used to the full.
+	return json.Unmarshal(raw, &c) == nil && c.Iss == "12345" && c.Exp-c.Iat == 600
 }
 
 func (f *fakeGitHub) provider(audience string) *Provider {
@@ -395,5 +397,20 @@ func TestParseAppKey(t *testing.T) {
 		if _, err := ParseAppKey(in); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// A page and a key document exactly at their size caps are accepted.
+func TestSizesAtLimits(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.organisation(t)
+	f.routes["/users/bob/keys?per_page=100"] = `[` + strings.Repeat(" ", maxPage-2) + `]`
+	jwks := `{"keys":[],"pad":""}`
+	f.routes["/jwks"] = strings.Replace(jwks, `""`, `"`+strings.Repeat("x", maxJWKS-len(jwks))+`"`, 1)
+	if len(f.routes["/jwks"]) != maxJWKS {
+		t.Fatalf("jwks is %d bytes", len(f.routes["/jwks"]))
+	}
+	if _, err := f.provider("naraen-lfs").FullSync(context.Background()); err != nil {
+		t.Fatalf("sync with bodies at the limits: %v", err)
 	}
 }

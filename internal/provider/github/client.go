@@ -76,7 +76,8 @@ func (a *AppAuth) Token(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.Now()
-	if len(a.token) > 0 && now.Add(tokenRefresh).Before(a.expires) {
+	// Before the first token, expires is zero, so this is false.
+	if now.Add(tokenRefresh).Before(a.expires) {
 		return a.token, nil
 	}
 	jwt, err := a.appJWT(now)

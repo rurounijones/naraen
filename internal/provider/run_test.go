@@ -74,9 +74,9 @@ func TestRun(t *testing.T) {
 	if cur, err := store.Current(); err != nil || cur != good {
 		t.Errorf("store holds %v, %v; want the first snapshot", cur, err)
 	}
-	for _, want := range []string{"full sync applied", "full sync failed", "full sync rejected", "provider=scripted"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("log lacks %q:\n%s", want, logs.String())
-		}
+	out := logs.String()
+	applied, failed, rejected := strings.Index(out, "full sync applied"), strings.Index(out, "full sync failed"), strings.Index(out, "full sync rejected")
+	if applied < 0 || failed < applied || rejected < failed || !strings.Contains(out, "provider=scripted") {
+		t.Errorf("want applied, failed, rejected in that order:\n%s", out)
 	}
 }

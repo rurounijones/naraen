@@ -142,11 +142,9 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 		Store: store, Authz: authorizer, Tokens: tokens, Base: cfg.PublicURL,
 		Rec: rec, Log: log, Now: time.Now,
 	}
-	// The webhook is optional: without it, access removed on GitHub stops at
-	// the next full sync instead of at once.
-	var webhook http.Handler
-	if len(cfg.WebhookSecret) > 0 {
-		webhook = &github.WebhookHandler{Secret: cfg.WebhookSecret, Store: store, Log: log}
+	webhook, err := webhookHandler(cfg, store, log)
+	if err != nil {
+		return err
 	}
 	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batchHandler, exchange, webhook), httpapi.TLSConfig(cert))
 
@@ -249,6 +247,19 @@ func loadTokenSigner(cfg config.Config, random io.Reader) (*token.Signer, error)
 	return s, nil
 }
 
+// webhookHandler builds the GitHub webhook handler. The webhook is optional:
+// without a secret it is not served, and access removed on GitHub stops at the
+// next full sync instead of at once.
+func webhookHandler(cfg config.Config, store github.Narrower, log *slog.Logger) (http.Handler, error) {
+	if len(cfg.WebhookSecret) == 0 {
+		return nil, nil
+	}
+	if sum := sha256.Sum256(cfg.WebhookSecret); !cfg.Dev && hex.EncodeToString(sum[:]) == devWebhookSecretSHA256 {
+		return nil, errors.New("webhook secret: this is the public development secret, accepted only when NARAEN_DEV=true")
+	}
+	return &github.WebhookHandler{Secret: cfg.WebhookSecret, Store: store, Log: log}, nil
+}
+
 // devKeyFingerprints are the development keys committed in
 // test/testdata/devkeys. Their private halves are public, so a snapshot that
 // lists either is refused outside dev mode: pointing a production server at
@@ -276,6 +287,12 @@ const (
 // entries hold it is refused outside dev mode: anyone could mint CI tokens it
 // accepts. TestDevSnapshotFixture keeps it in step with the key file.
 const devOIDCKeyX = "JvNOU9RbmLBeQroGvqHsQE2Ms6JLC5rqhgU4Z1UKqLM" // gitleaks:allow -- a public key coordinate, not a secret
+
+// devWebhookSecretSHA256 is the SHA-256 of the development webhook secret,
+// test/testdata/devkeys/webhook.secret, which DAST signs deliveries with. It
+// is public, so outside dev mode it is refused: anyone could sign deliveries
+// that revoke access. TestDevWebhookSecret keeps it in step with the file.
+const devWebhookSecretSHA256 = "a0383c888c0292889312f718b58f28211eeb84793ea5dffb8f6622f8661bae22" // #nosec G101 gitleaks:allow -- the hash of a public development value, used to refuse it
 
 // trustsDevOIDCKey reports whether any trust entry's JWKS holds the
 // development OIDC key.

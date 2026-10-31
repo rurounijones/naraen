@@ -71,8 +71,8 @@ services:
         condition: service_completed_successfully
     environment:
       # Development mode, with the committed public development host key, TLS
-      # certificate and client keys (test/testdata/devkeys), which the server
-      # refuses outside it. The token key is ephemeral. The files are in the
+      # certificate, client keys and webhook secret (test/testdata/devkeys),
+      # which the server refuses outside it. The token key is ephemeral. The files are in the
       # image, under /etc/naraen.
       NARAEN_DEV: "true"
       NARAEN_SSH_HOST_KEY_FILE: /etc/naraen/ssh_host_ed25519_key
@@ -81,6 +81,8 @@ services:
       NARAEN_SNAPSHOT_FILE: /etc/naraen/snapshot.json
       NARAEN_SNAPSHOT_MAX_AGE: 87600h  # the static snapshot is loaded once and never re-synced
       NARAEN_S3_BUCKET: naraen-dev
+      # Serves /webhooks/github, so DAST can sign deliveries and scan it.
+      NARAEN_GITHUB_WEBHOOK_SECRET_FILE: /etc/naraen/webhook.secret
       # Names every client resolves on the compose network. Plain http to a
       # host other than loopback is accepted for S3 only in development mode.
       NARAEN_PUBLIC_URL: https://naraen:8443

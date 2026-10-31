@@ -8,8 +8,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -536,6 +538,38 @@ func TestDevOIDCTrust(t *testing.T) {
 	data.Trusts[0].JWKS = string(jwks)
 	if err := loadSnapshot(datastore.NewStore(time.Hour, datastore.DefaultLimits), snapshotFile(data), false); err != nil {
 		t.Errorf("another issuer's key outside dev mode: %v", err)
+	}
+}
+
+// TestDevWebhookSecret holds the committed dev webhook secret and
+// devWebhookSecretSHA256 together, and proves that a server outside dev mode
+// refuses to start with it, while dev mode and any other secret are served.
+func TestDevWebhookSecret(t *testing.T) {
+	path := filepath.Join("..", "..", "test", "testdata", "devkeys", "webhook.secret")
+	cfg, err := config.Load(env(map[string]string{"NARAEN_DEV": "true", "NARAEN_GITHUB_WEBHOOK_SECRET_FILE": path}), os.ReadFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(cfg.WebhookSecret); hex.EncodeToString(sum[:]) != devWebhookSecretSHA256 {
+		t.Errorf("webhook.secret has SHA-256 %x, devWebhookSecretSHA256 is %s", sum, devWebhookSecretSHA256)
+	}
+	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
+	if h, err := webhookHandler(cfg, store, discard()); err != nil || h == nil {
+		t.Errorf("dev secret in dev mode: %v, %v", h, err)
+	}
+	if h, err := webhookHandler(config.Config{}, store, discard()); err != nil || h != nil {
+		t.Errorf("no secret: %v, %v", h, err)
+	}
+	if h, err := webhookHandler(config.Config{WebhookSecret: []byte("another secret of enough length")}, store, discard()); err != nil || h == nil {
+		t.Errorf("another secret outside dev mode: %v, %v", h, err)
+	}
+
+	// Outside dev mode the server does not start with it.
+	e := prodEnv(t)
+	e["NARAEN_SNAPSHOT_FILE"] = snapshotFile(t)
+	e["NARAEN_GITHUB_WEBHOOK_SECRET_FILE"] = path
+	if err := run(context.Background(), env(e), rand.Reader, discard()); err == nil || !strings.Contains(err.Error(), "development secret") {
+		t.Errorf("dev secret outside dev mode: %v", err)
 	}
 }
 

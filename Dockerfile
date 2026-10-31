@@ -186,7 +186,8 @@ COPY --from=build /out/naraen /usr/local/bin/naraen
 # --chmod also applies to the /etc/naraen directory it creates, which must stay
 # searchable; the files are public development values, readable by anyone.
 COPY --chmod=755 test/testdata/snapshot.json test/testdata/seaweedfs/aws-credentials \
-     test/testdata/devkeys/ssh_host_ed25519_key test/testdata/devkeys/tls.crt test/testdata/devkeys/tls.key /etc/naraen/
+     test/testdata/devkeys/ssh_host_ed25519_key test/testdata/devkeys/tls.crt test/testdata/devkeys/tls.key \
+     test/testdata/devkeys/webhook.secret /etc/naraen/
 ENV NARAEN_SSH_ADDR=:2222 NARAEN_HTTPS_ADDR=:8443
 EXPOSE 2222 8443
 USER 65532:65532

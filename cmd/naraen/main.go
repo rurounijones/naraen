@@ -102,7 +102,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	// With neither a snapshot file nor a provider the server stays not-ready
 	// and refuses everything.
 	if cfg.GitHub != nil {
-		p, err := githubProvider(*cfg.GitHub)
+		p, err := githubProvider(*cfg.GitHub, rec, log)
 		if err != nil {
 			return err
 		}
@@ -368,7 +368,7 @@ func loadStorage(ctx context.Context, endpoint, bucket string) (*s3store.Store, 
 
 // githubProvider builds the GitHub provider. Its HTTP client has a timeout, so
 // a hung GitHub request fails the sync instead of stalling every later one.
-func githubProvider(g config.GitHub) (*github.Provider, error) {
+func githubProvider(g config.GitHub, rec *telemetry.Recorder, log *slog.Logger) (*github.Provider, error) {
 	key, err := github.ParseAppKey(g.AppKey)
 	if err != nil {
 		return nil, err
@@ -379,7 +379,10 @@ func githubProvider(g config.GitHub) (*github.Provider, error) {
 		Key: key, HTTP: client, Now: time.Now,
 	}
 	return &github.Provider{
-		Client:   &github.Client{BaseURL: g.APIURL, HTTP: client, Token: auth.Token, Now: time.Now, Sleep: github.Sleep},
+		Client: &github.Client{
+			BaseURL: g.APIURL, HTTP: client, Token: auth.Token,
+			Now: time.Now, Sleep: github.Sleep, Log: log.With("provider", "github"), Rec: rec,
+		},
 		Org:      g.Org,
 		Audience: g.Audience,
 		JWKSURL:  g.JWKSURL,

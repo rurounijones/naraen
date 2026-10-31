@@ -5,9 +5,15 @@ package provider
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rurounijones/naraen/internal/datastore"
 )
+
+// ErrRateLimited marks a sync that failed because the source refused it for
+// its rate limit. Run counts such failures apart from others, since they
+// call for spreading load rather than fixing the source or its credentials.
+var ErrRateLimited = errors.New("rate limited")
 
 // Provider builds snapshots from a source service.
 type Provider interface {

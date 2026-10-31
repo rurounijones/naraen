@@ -26,7 +26,8 @@ import (
 )
 
 // collect returns every counter data point the reader holds, keyed by metric
-// name and then by the point's attributes.
+// name and then by the point's attributes. Float counters are truncated, so
+// tests give them values that add up to whole numbers.
 func collect(t *testing.T, r sdkmetric.Reader) map[string]map[attribute.Distinct]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -39,13 +40,24 @@ func collect(t *testing.T, r sdkmetric.Reader) map[string]map[attribute.Distinct
 			t.Errorf("scope = %q", sm.Scope.Name)
 		}
 		for _, m := range sm.Metrics {
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok || !sum.IsMonotonic {
-				t.Fatalf("%s is %T, want a monotonic int64 sum", m.Name, m.Data)
-			}
 			got[m.Name] = map[attribute.Distinct]int64{}
-			for _, dp := range sum.DataPoints {
-				got[m.Name][dp.Attributes.Equivalent()] = dp.Value
+			switch sum := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				if !sum.IsMonotonic {
+					t.Fatalf("%s is not monotonic", m.Name)
+				}
+				for _, dp := range sum.DataPoints {
+					got[m.Name][dp.Attributes.Equivalent()] = dp.Value
+				}
+			case metricdata.Sum[float64]:
+				if !sum.IsMonotonic {
+					t.Fatalf("%s is not monotonic", m.Name)
+				}
+				for _, dp := range sum.DataPoints {
+					got[m.Name][dp.Attributes.Equivalent()] = int64(dp.Value)
+				}
+			default:
+				t.Fatalf("%s is %T, want a monotonic sum", m.Name, m.Data)
 			}
 		}
 	}
@@ -75,6 +87,9 @@ func TestRecorder(t *testing.T) {
 	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeMissing)
 	r.BytesRequested(ctx, "download", "1", "alice", 300)
 	r.SyncFailure(ctx, "rejected")
+	r.RateLimitWait(ctx, 90*time.Second)
+	r.RateLimitWait(ctx, 1500*time.Millisecond)
+	r.RateLimitWait(ctx, 500*time.Millisecond)
 
 	got := collect(t, reader)
 	want := map[string]map[attribute.Distinct]int64{
@@ -88,8 +103,9 @@ func TestRecorder(t *testing.T) {
 			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "issued"):  2,
 			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "missing"): 1,
 		},
-		MetricBytesRequested: {set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice"): 300},
-		MetricSyncFailures:   {set(LabelReason, "rejected"): 1},
+		MetricBytesRequested:    {set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice"): 300},
+		MetricSyncFailures:      {set(LabelReason, "rejected"): 1},
+		MetricSyncRateLimitWait: {set(): 92},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("metrics = %v", got)

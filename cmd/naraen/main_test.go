@@ -28,6 +28,7 @@ import (
 	"testing/iotest"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -667,12 +668,14 @@ func TestGitHubProvider(t *testing.T) {
 		Org: "acme", AppID: "1", InstallationID: "2", AppKey: appKeyPEM(t),
 		APIURL: "https://api.github.com", JWKSURL: "https://keys", Audience: "aud",
 	}
-	p, err := githubProvider(g)
-	if err != nil || p.Org != "acme" || p.Audience != "aud" || p.JWKSURL != "https://keys" || p.Client.BaseURL != g.APIURL {
+	rec := telemetry.NewRecorder(noop.NewMeterProvider())
+	log := slog.New(slog.DiscardHandler)
+	p, err := githubProvider(g, rec, log)
+	if err != nil || p.Org != "acme" || p.Audience != "aud" || p.JWKSURL != "https://keys" || p.Client.BaseURL != g.APIURL || p.Client.Rec != rec {
 		t.Fatalf("provider = %+v, %v", p, err)
 	}
 	g.AppKey = []byte("not a key")
-	if _, err := githubProvider(g); err == nil {
+	if _, err := githubProvider(g, rec, log); err == nil {
 		t.Error("bad app key accepted")
 	}
 }

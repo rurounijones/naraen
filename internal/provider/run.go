@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -21,12 +22,16 @@ func Run(ctx context.Context, p Provider, store *datastore.Store, interval time.
 		snap, err := p.FullSync(ctx)
 		if err != nil {
 			log.ErrorContext(ctx, "full sync failed", "error", err)
-			rec.SyncFailure(ctx, "failed")
+			reason := telemetry.SyncFailed
+			if errors.Is(err, ErrRateLimited) {
+				reason = telemetry.SyncRateLimited
+			}
+			rec.SyncFailure(ctx, reason)
 			return
 		}
 		if err := store.Swap(start, snap); err != nil {
 			log.ErrorContext(ctx, "full sync rejected", "error", err)
-			rec.SyncFailure(ctx, "rejected")
+			rec.SyncFailure(ctx, telemetry.SyncRejected)
 			return
 		}
 		log.InfoContext(ctx, "full sync applied", "synced_at", snap.Meta().SyncedAt)

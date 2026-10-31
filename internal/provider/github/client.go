@@ -13,12 +13,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rurounijones/naraen/internal/provider"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 const (
@@ -144,6 +148,10 @@ type Client struct {
 	// Now and Sleep are replaceable in tests; main sets time.Now and Sleep.
 	Now   func() time.Time
 	Sleep func(context.Context, time.Duration) error
+	// Log and Rec report each rate-limit refusal and the time requests were
+	// held back for it, so a sync slowed by a wait is visible while it waits.
+	Log *slog.Logger
+	Rec *telemetry.Recorder
 
 	mu sync.Mutex
 	// resume is when GitHub's rate limit allows requests again. No request
@@ -173,6 +181,8 @@ func (e *rateLimited) Error() string {
 	return fmt.Sprintf("github: %s: rate limited, retry after %s", e.path, e.wait)
 }
 
+func (e *rateLimited) Unwrap() error { return provider.ErrRateLimited }
+
 // response is one page as GitHub answered it.
 type response struct {
 	body       []byte
@@ -198,7 +208,9 @@ func (c *Client) get(ctx context.Context, u, etag string) (response, error) {
 		if !errors.As(err, &limited) {
 			return resp, err
 		}
-		c.pause(limited.wait)
+		resume := c.pause(ctx, limited.wait)
+		c.Log.WarnContext(ctx, "github rate limit: holding requests back",
+			"path", limited.path, "wait", limited.wait, "resume", resume, "attempt", attempt+1)
 		if attempt == maxRateLimitRetries {
 			return response{}, err
 		}
@@ -218,7 +230,7 @@ func (c *Client) awaitResume(ctx context.Context) error {
 			return nil
 		}
 		if d > maxRateLimitWait {
-			return fmt.Errorf("github: rate limited until %s", resume.UTC().Format(time.RFC3339))
+			return fmt.Errorf("github: %w until %s", provider.ErrRateLimited, resume.UTC().Format(time.RFC3339))
 		}
 		if err := c.Sleep(ctx, d); err != nil {
 			return fmt.Errorf("github: waiting out the rate limit: %w", err)
@@ -227,13 +239,26 @@ func (c *Client) awaitResume(ctx context.Context) error {
 }
 
 // pause holds every request back for d, or for longer if already paused
-// longer.
-func (c *Client) pause(d time.Duration) {
+// longer, and returns when requests may resume. Only the time by which it
+// extends the hold is counted, so requests refused together are not counted
+// once each.
+func (c *Client) pause(ctx context.Context, d time.Duration) time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if until := c.Now().Add(d); until.After(c.resume) {
+	now := c.Now()
+	if until := now.Add(d); until.After(c.resume) {
+		c.Rec.RateLimitWait(ctx, until.Sub(later(now, c.resume)))
 		c.resume = until
 	}
+	return c.resume
+}
+
+// later returns the later of a and b.
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // limitWait reports whether GitHub refused resp for its rate limit, and how

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -58,8 +59,9 @@ func snapshot(t *testing.T, people int) *datastore.Snapshot {
 	return s
 }
 
-// The first sync makes the store ready; a failed sync and one the store
-// rejects leave it serving the last good snapshot.
+// The first sync makes the store ready; a failed sync, one failed by the
+// source's rate limit, and one the store rejects leave it serving the last
+// good snapshot, each counted under its own reason.
 func TestRun(t *testing.T) {
 	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
 	good := snapshot(t, 1)
@@ -68,6 +70,7 @@ func TestRun(t *testing.T) {
 	p := &scripted{cancel: cancel, then: keep, results: []func() (*datastore.Snapshot, error){
 		keep,
 		func() (*datastore.Snapshot, error) { return nil, errors.New("github down") },
+		func() (*datastore.Snapshot, error) { return nil, fmt.Errorf("github: wait: %w", ErrRateLimited) },
 		// Swap rejects an empty snapshot.
 		func() (*datastore.Snapshot, error) { return snapshot(t, 0), nil },
 	}}
@@ -101,7 +104,7 @@ func TestRun(t *testing.T) {
 			}
 		}
 	}
-	if failures["failed"] != 1 || failures["rejected"] != 1 {
+	if failures["failed"] != 1 || failures["rate_limited"] != 1 || failures["rejected"] != 1 {
 		t.Errorf("sync failures = %v", failures)
 	}
 	out := logs.String()

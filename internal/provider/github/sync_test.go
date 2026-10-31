@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/rurounijones/naraen/internal/datastore"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 var syncNow = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
@@ -209,6 +213,7 @@ func (f *fakeGitHub) provider(audience string) *Provider {
 		Client: &Client{
 			BaseURL: f.URL, HTTP: f.Client(), Token: auth.Token,
 			Now: func() time.Time { return syncNow }, Sleep: Sleep,
+			Log: slog.New(slog.DiscardHandler), Rec: telemetry.NewRecorder(noop.NewMeterProvider()),
 		},
 		Org:      "acme",
 		Audience: audience,

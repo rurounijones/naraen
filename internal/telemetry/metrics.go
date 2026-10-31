@@ -13,16 +13,17 @@ import (
 
 // Metric names.
 const (
-	MetricLinksIssued      = "lfs.links.issued"
-	MetricBytesRequested   = "lfs.bytes.requested"
-	MetricBytesTransferred = "lfs.bytes.transferred"
-	MetricObjectSize       = "lfs.object.size"
-	MetricAuthFailures     = "lfs.auth.failures"
-	MetricTokensIssued     = "lfs.tokens.issued" // #nosec G101 -- a metric name, not a credential
-	MetricSSHConnsRejected = "lfs.ssh.connections.rejected"
-	MetricTransferFeedLag  = "lfs.transfer_feed.lag"
-	MetricDatastoreAge     = "lfs.datastore.age"
-	MetricSyncFailures     = "lfs.sync.failures"
+	MetricLinksIssued       = "lfs.links.issued"
+	MetricBytesRequested    = "lfs.bytes.requested"
+	MetricBytesTransferred  = "lfs.bytes.transferred"
+	MetricObjectSize        = "lfs.object.size"
+	MetricAuthFailures      = "lfs.auth.failures"
+	MetricTokensIssued      = "lfs.tokens.issued" // #nosec G101 -- a metric name, not a credential
+	MetricSSHConnsRejected  = "lfs.ssh.connections.rejected"
+	MetricTransferFeedLag   = "lfs.transfer_feed.lag"
+	MetricDatastoreAge      = "lfs.datastore.age"
+	MetricSyncFailures      = "lfs.sync.failures"
+	MetricSyncRateLimitWait = "lfs.sync.rate_limit_wait"
 )
 
 // Label names allowed on metrics.
@@ -53,6 +54,7 @@ type Recorder struct {
 	bytesReq      metric.Int64Counter
 	objectSize    metric.Int64Histogram
 	syncFailures  metric.Int64Counter
+	syncWait      metric.Float64Counter
 }
 
 // NewRecorder creates the instruments on mp.
@@ -82,9 +84,13 @@ func NewRecorder(mp metric.MeterProvider) *Recorder {
 	syncFailures, _ := m.Int64Counter(MetricSyncFailures,
 		metric.WithUnit("{sync}"),
 		metric.WithDescription("Provider full syncs that failed or that the datastore rejected"))
+	syncWait, _ := m.Float64Counter(MetricSyncRateLimitWait,
+		metric.WithUnit("s"),
+		metric.WithDescription("Seconds the provider held its requests back for the source's rate limit"))
 	return &Recorder{
 		authFailures: authFailures, tokensIssued: tokensIssued, connsRejected: connsRejected,
 		linksIssued: linksIssued, bytesReq: bytesReq, objectSize: objectSize, syncFailures: syncFailures,
+		syncWait: syncWait,
 	}
 }
 
@@ -146,11 +152,25 @@ func (r *Recorder) ObjectSize(ctx context.Context, op, repoID string, size int64
 		attribute.String(LabelRepo, repoID)))
 }
 
+// Reasons of lfs.sync.failures.
+const (
+	SyncFailed      = "failed"       // the source could not be read
+	SyncRateLimited = "rate_limited" // the source refused for its rate limit
+	SyncRejected    = "rejected"     // the store refused the snapshot
+)
+
 // SyncFailure counts one provider full sync that did not reach the datastore.
-// reason is "failed" (the source could not be read) or "rejected" (the store
-// refused the snapshot).
+// reason is one of the Sync constants.
 func (r *Recorder) SyncFailure(ctx context.Context, reason string) {
 	r.syncFailures.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelReason, reason)))
+}
+
+// RateLimitWait counts d more of the provider's requests being held back for
+// the source's rate limit. Requests refused together add only the time by
+// which each extended the hold, so the total is time held, not a sum of
+// overlapping waits.
+func (r *Recorder) RateLimitWait(ctx context.Context, d time.Duration) {
+	r.syncWait.Add(ctx, d.Seconds())
 }
 
 // ObserveDatastoreAge reports age, in seconds, as lfs.datastore.age at every

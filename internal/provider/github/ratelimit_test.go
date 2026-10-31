@@ -1,8 +1,10 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -10,6 +12,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/rurounijones/naraen/internal/provider"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 // fakeClock stands in for the client's clock: Sleep moves it on at once and
@@ -215,17 +223,77 @@ func TestRateLimitWaitInterrupted(t *testing.T) {
 }
 
 // A pause only ever grows: a shorter wait from another request does not cut
-// a longer one short.
+// a longer one short. Only the time by which a pause extends the hold is
+// counted, so overlapping refusals count once.
 func TestPauseOnlyExtends(t *testing.T) {
-	c := &Client{Now: func() time.Time { return syncNow }}
-	c.pause(2 * time.Minute)
-	c.pause(time.Minute)
-	if !c.resume.Equal(syncNow.Add(2 * time.Minute)) {
-		t.Errorf("resume = %v, want two minutes on", c.resume)
+	clock := &fakeClock{now: syncNow}
+	reader := sdkmetric.NewManualReader()
+	c := &Client{Now: clock.Now, Rec: telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))}
+	ctx := context.Background()
+	if r := c.pause(ctx, 2*time.Minute); !r.Equal(syncNow.Add(2 * time.Minute)) {
+		t.Errorf("resume = %v, want two minutes on", r)
 	}
-	c.pause(3 * time.Minute)
-	if !c.resume.Equal(syncNow.Add(3 * time.Minute)) {
-		t.Errorf("resume = %v, want three minutes on", c.resume)
+	if r := c.pause(ctx, time.Minute); !r.Equal(syncNow.Add(2 * time.Minute)) {
+		t.Errorf("shorter pause: resume = %v, want two minutes on", r)
+	}
+	if r := c.pause(ctx, 3*time.Minute); !r.Equal(syncNow.Add(3 * time.Minute)) {
+		t.Errorf("longer pause: resume = %v, want three minutes on", r)
+	}
+	// Long after the hold ended, a new pause counts in full.
+	clock.advance(10 * time.Minute)
+	c.pause(ctx, time.Minute)
+	// 2 minutes, then the 1 minute the longer pause added, then 1 minute.
+	if got := waited(t, reader); got != 4*time.Minute {
+		t.Errorf("counted %v held back, want 4m", got)
+	}
+}
+
+// waited returns the lfs.sync.rate_limit_wait total the reader holds.
+func waited(t *testing.T, reader *sdkmetric.ManualReader) time.Duration {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if s, ok := m.Data.(metricdata.Sum[float64]); ok && m.Name == telemetry.MetricSyncRateLimitWait {
+				return time.Duration(s.DataPoints[0].Value * float64(time.Second))
+			}
+		}
+	}
+	return 0
+}
+
+// Each refusal is logged with the wait and when requests resume, the hold is
+// counted, and a sync that gives up fails with provider.ErrRateLimited, so
+// Run counts it under its own reason.
+func TestRateLimitReported(t *testing.T) {
+	secondary := refusal{http.StatusForbidden, nil, secondaryMessage}
+	_, p, _ := limitedProvider(t, refusal{http.StatusTooManyRequests, map[string]string{"Retry-After": "30"}, ""})
+	var logs bytes.Buffer
+	reader := sdkmetric.NewManualReader()
+	p.Client.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	p.Client.Rec = telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	if _, err := p.FullSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := `level=WARN msg="github rate limit: holding requests back" path=/orgs/acme/members wait=30s resume=` +
+		syncNow.Add(30*time.Second).Format("2006-01-02T15:04:05.000Z07:00") + " attempt=1"
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log:\n%s\nwant %s", logs.String(), want)
+	}
+	if got := waited(t, reader); got != 30*time.Second {
+		t.Errorf("counted %v held back, want 30s", got)
+	}
+
+	_, p, _ = limitedProvider(t, secondary, secondary, secondary, secondary)
+	_, err := p.FullSync(context.Background())
+	if !errors.Is(err, provider.ErrRateLimited) {
+		t.Errorf("gave up with %v, want ErrRateLimited", err)
+	}
+	if _, err := p.FullSync(context.Background()); !errors.Is(err, provider.ErrRateLimited) {
+		t.Errorf("held back with %v, want ErrRateLimited", err)
 	}
 }
 

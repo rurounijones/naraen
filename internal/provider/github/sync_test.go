@@ -48,6 +48,18 @@ type fakeGitHub struct {
 	delay                 time.Duration
 	// mu is held for reading while a request is served; see edit.
 	mu sync.RWMutex
+	// limits holds refusals served, in order, before a path's page; hits
+	// counts the API requests for each path. limitMu guards both.
+	limitMu sync.Mutex
+	limits  map[string][]refusal
+	hits    map[string]int
+}
+
+// refusal is a response refusing a request, such as for the rate limit.
+type refusal struct {
+	status int
+	header map[string]string
+	body   string
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -56,7 +68,10 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeGitHub{appKey: key, routes: map[string]string{}, links: map[string]string{}, status: map[string]int{}, tokenStatus: http.StatusCreated}
+	f := &fakeGitHub{
+		appKey: key, routes: map[string]string{}, links: map[string]string{}, status: map[string]int{}, tokenStatus: http.StatusCreated,
+		limits: map[string][]refusal{}, hits: map[string]int{},
+	}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.Close)
 	return f
@@ -99,6 +114,14 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	raise(&f.maxInFlight, f.inFlight.Add(1))
 	defer f.inFlight.Add(-1)
 	time.Sleep(f.delay)
+	if ref, ok := f.refuse(key); ok {
+		for k, v := range ref.header {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(ref.status)
+		_, _ = w.Write([]byte(ref.body))
+		return
+	}
 	body, ok := f.routes[key]
 	if !ok {
 		http.Error(w, "not found: "+key, http.StatusNotFound)
@@ -122,6 +145,26 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(s)
 	}
 	_, _ = w.Write([]byte(body))
+}
+
+// refuse counts a request for key and takes its next refusal, if any.
+func (f *fakeGitHub) refuse(key string) (refusal, bool) {
+	f.limitMu.Lock()
+	defer f.limitMu.Unlock()
+	f.hits[key]++
+	rs := f.limits[key]
+	if len(rs) == 0 {
+		return refusal{}, false
+	}
+	f.limits[key] = rs[1:]
+	return rs[0], true
+}
+
+// hitsFor returns how many API requests for key arrived.
+func (f *fakeGitHub) hitsFor(key string) int {
+	f.limitMu.Lock()
+	defer f.limitMu.Unlock()
+	return f.hits[key]
 }
 
 // raise sets v to n if n is larger.
@@ -163,7 +206,10 @@ func (f *fakeGitHub) validAppJWT(tok string) bool {
 func (f *fakeGitHub) provider(audience string) *Provider {
 	auth := &AppAuth{BaseURL: f.URL, AppID: "12345", InstallationID: "99", Key: f.appKey, HTTP: f.Client(), Now: func() time.Time { return syncNow }}
 	return &Provider{
-		Client:   &Client{BaseURL: f.URL, HTTP: f.Client(), Token: auth.Token},
+		Client: &Client{
+			BaseURL: f.URL, HTTP: f.Client(), Token: auth.Token,
+			Now: func() time.Time { return syncNow }, Sleep: Sleep,
+		},
 		Org:      "acme",
 		Audience: audience,
 		JWKSURL:  f.URL + "/jwks",

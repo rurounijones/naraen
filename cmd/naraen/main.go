@@ -379,7 +379,7 @@ func githubProvider(g config.GitHub) (*github.Provider, error) {
 		Key: key, HTTP: client, Now: time.Now,
 	}
 	return &github.Provider{
-		Client:   &github.Client{BaseURL: g.APIURL, HTTP: client, Token: auth.Token},
+		Client:   &github.Client{BaseURL: g.APIURL, HTTP: client, Token: auth.Token, Now: time.Now, Sleep: github.Sleep},
 		Org:      g.Org,
 		Audience: g.Audience,
 		JWKSURL:  g.JWKSURL,

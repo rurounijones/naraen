@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +31,14 @@ const (
 	// tokenRefresh renews an installation token this long before it
 	// expires, so a token never lapses in the middle of a sync.
 	tokenRefresh = 5 * time.Minute
+	// maxRateLimitWait is the longest a request waits out GitHub's rate
+	// limit. A longer pause fails the sync instead: a snapshot's age counts
+	// from when its sync began, so one that waited longer would be published
+	// already old, and the next scheduled sync is as good a retry.
+	maxRateLimitWait = 5 * time.Minute
+	// maxRateLimitRetries bounds the retries of a request GitHub keeps
+	// refusing for its rate limit.
+	maxRateLimitRetries = 3
 )
 
 // ParseAppKey reads a GitHub App private key, which GitHub issues as a PKCS #1
@@ -131,6 +141,36 @@ type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 	Token   func(context.Context) (string, error)
+	// Now and Sleep are replaceable in tests; main sets time.Now and Sleep.
+	Now   func() time.Time
+	Sleep func(context.Context, time.Duration) error
+
+	mu sync.Mutex
+	// resume is when GitHub's rate limit allows requests again. No request
+	// is sent before then, from this sync or a later one.
+	resume time.Time
+}
+
+// Sleep waits for d, or until ctx is done.
+func Sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-t.C:
+		return nil
+	}
+}
+
+// rateLimited is a request GitHub refused for its rate limit.
+type rateLimited struct {
+	path string
+	wait time.Duration
+}
+
+func (e *rateLimited) Error() string {
+	return fmt.Sprintf("github: %s: rate limited, retry after %s", e.path, e.wait)
 }
 
 // response is one page as GitHub answered it.
@@ -143,7 +183,84 @@ type response struct {
 
 // get reads u. With etag set it asks for the page only if it has changed
 // since, and a 304 comes back as notModified.
+//
+// A request refused for the rate limit is retried after the wait GitHub asks
+// for, at most maxRateLimitRetries times, and the wait holds back every
+// other request too: GitHub warns that an integration which keeps sending
+// requests while limited may be banned.
 func (c *Client) get(ctx context.Context, u, etag string) (response, error) {
+	for attempt := 0; ; attempt++ {
+		if err := c.awaitResume(ctx); err != nil {
+			return response{}, err
+		}
+		resp, err := c.do(ctx, u, etag, attempt)
+		var limited *rateLimited
+		if !errors.As(err, &limited) {
+			return resp, err
+		}
+		c.pause(limited.wait)
+		if attempt == maxRateLimitRetries {
+			return response{}, err
+		}
+	}
+}
+
+// awaitResume waits until the rate limit allows requests again, or fails at
+// once if that is more than maxRateLimitWait away. It checks again after
+// waiting, since another request may have extended the pause meanwhile.
+func (c *Client) awaitResume(ctx context.Context) error {
+	for {
+		c.mu.Lock()
+		resume := c.resume
+		c.mu.Unlock()
+		d := resume.Sub(c.Now())
+		if d <= 0 {
+			return nil
+		}
+		if d > maxRateLimitWait {
+			return fmt.Errorf("github: rate limited until %s", resume.UTC().Format(time.RFC3339))
+		}
+		if err := c.Sleep(ctx, d); err != nil {
+			return fmt.Errorf("github: waiting out the rate limit: %w", err)
+		}
+	}
+}
+
+// pause holds every request back for d, or for longer if already paused
+// longer.
+func (c *Client) pause(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if until := c.Now().Add(d); until.After(c.resume) {
+		c.resume = until
+	}
+}
+
+// limitWait reports whether GitHub refused resp for its rate limit, and how
+// long to wait before retrying, in the order GitHub documents: the seconds
+// in Retry-After; else, with no requests remaining, until the reset time;
+// else a minute, doubling with each retry. A 429 is always a rate limit, but
+// a 403 only when its headers or message say so; otherwise it is a missing
+// permission and fails like any other status.
+func limitWait(resp *http.Response, body []byte, now time.Time, attempt int) (time.Duration, bool) {
+	h := resp.Header
+	exhausted := h.Get("X-RateLimit-Remaining") == "0"
+	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden ||
+		h.Get("Retry-After") == "" && !exhausted && !bytes.Contains(body, []byte("rate limit"))) {
+		return 0, false
+	}
+	// 32 bits of seconds cannot overflow a Duration.
+	if s, err := strconv.ParseUint(h.Get("Retry-After"), 10, 32); err == nil {
+		return time.Duration(s) * time.Second, true
+	}
+	if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); exhausted && err == nil {
+		return max(time.Unix(reset, 0).Sub(now), 0), true
+	}
+	return time.Minute << attempt, true
+}
+
+// do sends one request for get.
+func (c *Client) do(ctx context.Context, u, etag string, attempt int) (response, error) {
 	tok, err := c.Token(ctx)
 	if err != nil {
 		return response{}, err
@@ -169,6 +286,9 @@ func (c *Client) get(ctx context.Context, u, etag string) (response, error) {
 	}
 	if resp.StatusCode == http.StatusNotModified && etag != "" {
 		return response{notModified: true}, nil
+	}
+	if wait, ok := limitWait(resp, body, c.Now(), attempt); ok {
+		return response{}, &rateLimited{req.URL.Path, wait}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return response{}, fmt.Errorf("github: %s: status %d", req.URL.Path, resp.StatusCode)

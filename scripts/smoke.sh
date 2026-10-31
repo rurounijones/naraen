@@ -3,10 +3,14 @@
 # End-to-end check of the compose stack (docker compose up -d) with real
 # clients: the writer pushes a new LFS object through SSH authentication, the
 # Batch API and a signed S3 upload; the reader clones and pulls it back; the
-# reader's own push is refused. Runs from the host or the devcontainer, which
-# both reach the stack on localhost. It is also the README's walkthrough.
+# reader's own push is refused. It is also the README's walkthrough.
+#
+# Runs anywhere that resolves the stack's service names naraen and s3: the
+# client and dev containers, or the host with "127.0.0.1 naraen s3" in its
+# hosts file.
 set -euo pipefail
 
+host=naraen
 # Native Windows git-lfs cannot open Git Bash's /c/... paths; pwd -W gives
 # C:/... there, which every tool here understands.
 abs() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
@@ -19,11 +23,11 @@ cd "$work"
 # ssh refuses private keys that others can read, and git keeps no file modes.
 for k in writer reader; do install -m 600 "$keys/$k" "$k"; done
 # The dev host key is fixed, so it is trusted up front rather than on first use.
-echo "[localhost]:2222 $(cut -d' ' -f1,2 "$keys/ssh_host_ed25519_key.pub")" >known_hosts
+echo "[$host]:2222 $(cut -d' ' -f1,2 "$keys/ssh_host_ed25519_key.pub")" >known_hosts
 
 # lfs <identity> <repo>: point a repo's LFS at the local server as identity.
 lfs() {
-  git -C "$2" config lfs.url ssh://git@localhost:2222/example/repo
+  git -C "$2" config lfs.url "ssh://git@$host:2222/example/repo"
   git -C "$2" config http.sslCAInfo "$keys/tls.crt"
   # Git for Windows defaults to schannel, and git-lfs then ignores sslCAInfo.
   git -C "$2" config http.sslBackend openssl

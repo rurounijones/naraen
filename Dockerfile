@@ -93,6 +93,33 @@ USER ${DEV_USER}
 WORKDIR /workspaces/naraen
 
 # ---------------------------------------------------------------------------
+# client: a developer's machine in a container, for trying the local stack
+# with real clients. git, git-lfs and ssh, set up the way a developer would
+# be: the public development keys in ~/.ssh (writer by default), the dev
+# server's host key trusted, and its TLS certificate trusted by git.
+# docker-compose.yml runs it as the service client.
+# ---------------------------------------------------------------------------
+FROM ${GO_IMAGE} AS client
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git git-lfs openssh-client \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 1000 --shell /bin/bash dev \
+ && install -d -m 700 -o dev -g dev /home/dev/.ssh
+COPY --chown=dev:dev --chmod=600 test/testdata/devkeys/writer test/testdata/devkeys/reader /home/dev/.ssh/
+COPY test/testdata/devkeys/tls.crt test/testdata/devkeys/ssh_host_ed25519_key.pub /usr/local/share/naraen/
+USER 1000:1000
+WORKDIR /home/dev
+RUN echo "[naraen]:2222 $(cut -d' ' -f1,2 /usr/local/share/naraen/ssh_host_ed25519_key.pub)" > ~/.ssh/known_hosts \
+ && printf 'Host naraen\n  Port 2222\n  User git\n  IdentityFile ~/.ssh/writer\n  IdentitiesOnly yes\n' > ~/.ssh/config \
+ && git config --global http.sslCAInfo /usr/local/share/naraen/tls.crt \
+ && git config --global lfs.locksverify false \
+ && git config --global init.defaultBranch main \
+ && git config --global user.name "Dev" \
+ && git config --global user.email dev@example.invalid \
+ && git lfs install
+CMD ["sleep", "infinity"]
+
+# ---------------------------------------------------------------------------
 # build: static, position-independent, stripped binary.
 # This is the project's one build recipe; .goreleaser.yaml (and with it
 # `task build`) uses the same flags. Change both together.

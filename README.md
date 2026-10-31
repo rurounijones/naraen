@@ -99,32 +99,31 @@ Everything runs in a container; no host Go toolchain is required.
 
 ### Try it locally
 
-`docker compose up -d` (or opening the devcontainer) starts a working server with storage:
+`docker compose up -d` (or opening the devcontainer) starts a working server with storage, and a container to use it from. On the compose network each service is reached by name:
 
-- SeaweedFS as S3 on `127.0.0.1:8333`, checking signatures, with the bucket `naraen-dev` created.
-- The server in development mode, with SSH on `localhost:2222` and the Batch API on `https://localhost:8443`. It loads `test/testdata/snapshot.json`, which accepts the two committed development keys in `test/testdata/devkeys/`: `writer` may upload and download `example/repo`, and `reader` may only download. Its SSH host key and TLS certificate are committed beside them. All of these are public on purpose, and the server refuses them outside development mode.
+- `s3`: SeaweedFS on `http://s3:8333`, checking signatures, with the bucket `naraen-dev` created.
+- `naraen`: the server in development mode, with SSH on `naraen:2222` and the Batch API on `https://naraen:8443`. It loads `test/testdata/snapshot.json`, which accepts the two committed development keys in `test/testdata/devkeys/`: `writer` may upload and download `example/repo`, and `reader` may only download. Its SSH host key and TLS certificate are committed beside them. All of these are public on purpose, and the server refuses them outside development mode.
+- `client`: a developer's machine with git, git-lfs and ssh. It holds the dev keys (`writer` by default), and trusts the server's host key and certificate.
 
-The server, SeaweedFS and the devcontainer share one network namespace, and compose publishes its ports on the host's loopback, so these addresses are the same from the host and from the devcontainer. That matters for S3: a pre-signed link signs the S3 address, so the server must name S3 by an address its clients reach as well.
+A pre-signed link names the S3 host it was signed for, and the Batch API's address is the server's name. So every client must resolve `naraen` and `s3`, and every container on the compose network does.
 
-`scripts/smoke.sh` (`task smoke`) is the walkthrough as a script. It pushes a new file as `writer`, clones and pulls it as `reader`, and checks that `reader` may not push. By hand, configure a repository like this:
+Work as a developer from the client. Repositories carry the LFS address in a committed `.lfsconfig`:
 
 ```sh
-keys=$PWD/test/testdata/devkeys
-cp "$keys/writer" ~/.ssh/naraen-dev-writer && chmod 600 ~/.ssh/naraen-dev-writer
-echo "[localhost]:2222 $(cut -d' ' -f1,2 "$keys/ssh_host_ed25519_key.pub")" >> ~/.ssh/known_hosts
-
-cd your-repo
-git config lfs.url ssh://git@localhost:2222/example/repo
-git config http.sslCAInfo "$keys/tls.crt"
-git config http.sslBackend openssl   # Git for Windows only: git-lfs ignores sslCAInfo under schannel
-git config lfs.locksverify false
-git config core.sshCommand "ssh -i ~/.ssh/naraen-dev-writer -o IdentitiesOnly=yes"
-git lfs track '*.bin' && git add .gitattributes && git commit -m 'Track binaries'
+docker compose exec client bash
+git init demo && cd demo
+git config -f .lfsconfig lfs.url ssh://git@naraen:2222/example/repo
+git lfs track '*.psd'
+head -c 1000000 /dev/urandom > art.psd
+git add . && git commit -m 'Add art'
+git init --bare ~/origin.git && git remote add origin ~/origin.git
+git push origin main             # uploads art.psd through the server to S3
+cd .. && git clone ~/origin.git copy   # downloads it again
 ```
 
-After that, `git push` uploads LFS objects and `git lfs pull` downloads them. On Windows, give `http.sslCAInfo` a `C:/...` path, because git-lfs cannot read Git Bash's `/c/...` form.
+`scripts/smoke.sh` (`task smoke`) does the same as a check, and adds that `reader` may not push. Run it in the client (`docker compose exec client /src/scripts/smoke.sh`, with the repository mounted at `/src`) or in the devcontainer. DAST runs it before scanning.
 
-The stack serves this machine only. The links point at `127.0.0.1`, and the Batch API's address comes from `NARAEN_PUBLIC_URL`, which defaults to localhost in development mode.
+To use the stack from the host instead, where compose publishes the ports on `127.0.0.1`, add `127.0.0.1 naraen s3` to the hosts file (`C:\Windows\System32\drivers\etc\hosts` on Windows). Then set up a repository the way the client image is set up: trust the host key (`[naraen]:2222` plus the key in `ssh_host_ed25519_key.pub`) and the certificate (`git config http.sslCAInfo`), and use the `writer` key with mode 600. On Windows, also set `git config http.sslBackend openssl`, because git-lfs ignores `sslCAInfo` under the default schannel backend, and give `sslCAInfo` a `C:/...` path, because git-lfs cannot read Git Bash's `/c/...` form.
 
 ### Configuration
 

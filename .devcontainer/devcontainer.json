@@ -1,12 +1,11 @@
 {
   "name": "naraen",
-  // The dev service of docker-compose.yml, started with the whole local stack
-  // (SeaweedFS, its bucket, and the server) and sharing the server's network
-  // namespace: SSH, HTTPS and S3 are on localhost here as on the host, where
-  // compose also publishes them on 127.0.0.1.
+  // The dev service of docker-compose.yml, started with the whole local stack:
+  // SeaweedFS and its bucket, the server, and client, a developer's machine
+  // to try it from. On the compose network the server is naraen and S3 is s3.
   "dockerComposeFile": "../docker-compose.yml",
   "service": "dev",
-  "runServices": ["s3", "s3-init", "naraen", "dev"],
+  "runServices": ["s3", "s3-init", "naraen", "client", "dev"],
   "shutdownAction": "stopCompose",
   "remoteUser": "vscode",
   "workspaceFolder": "/workspaces/naraen",

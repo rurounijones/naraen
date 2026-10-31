@@ -1,5 +1,15 @@
 # Local stack for the devcontainer, integration tests and DAST.
 # Images are pinned by digest; Dependabot keeps them current.
+#
+# `docker compose up -d` starts a working server: SSH on 127.0.0.1:2222, the
+# Batch API on https://localhost:8443 and S3 on 127.0.0.1:8333. The devcontainer
+# (service dev) runs in the same stack.
+#
+# s3, naraen and dev share one network namespace, owned by s3. Pre-signed links
+# sign the S3 host, so the server must name S3 by an address its clients reach
+# too: 127.0.0.1:8333 is S3 for the server, for the devcontainer, and through
+# the published port for the host. Other containers on the compose network
+# (the DAST tools) reach the server as naraen, an alias of that namespace.
 name: naraen
 
 services:
@@ -11,24 +21,63 @@ services:
     # serves anyone, and tests of signed links would prove nothing. The
     # credentials in it are public development values.
     command: ["server", "-s3", "-dir=/data", "-s3.config=/etc/seaweedfs/s3.json"]
-    ports: ["127.0.0.1:8333:8333"]
+    # The namespace's published ports: S3, and the server's SSH and HTTPS.
+    ports: ["127.0.0.1:8333:8333", "127.0.0.1:2222:2222", "127.0.0.1:8443:8443"]
+    networks:
+      default:
+        aliases: [naraen]
     volumes: ["s3-data:/data", "./test/testdata/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro"]
+
+  # Creates the bucket the dev server maps example/repo to, then exits. It
+  # goes through SeaweedFS's own shell, so the signer identity needs no
+  # bucket-creation rights, as in production.
+  s3-init:
+    image: ${S3_IMAGE:-chrislusf/seaweedfs:latest@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
+    network_mode: service:s3
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        b=naraen-dev
+        weed() { echo "$$1" | /usr/bin/weed shell -master=127.0.0.1:9333 2>&1; }
+        for i in $$(seq 60); do
+          weed s3.bucket.list | grep -qw "$$b" && exit 0
+          weed "s3.bucket.create -name $$b"
+          sleep 1
+        done
+        echo "bucket $$b not created" >&2
+        exit 1
 
   naraen:
     build:
       context: .
       target: runtime
+    network_mode: service:s3
+    depends_on:
+      s3-init:
+        condition: service_completed_successfully
     environment:
-      # Development mode: key material that is not configured is ephemeral,
-      # so none is written down anywhere.
+      # Development mode, with the committed public development host key, TLS
+      # certificate and client keys (test/testdata/devkeys), which the server
+      # refuses outside it. The token key is ephemeral.
       NARAEN_DEV: "true"
+      NARAEN_SSH_HOST_KEY_FILE: /etc/naraen/ssh_host_ed25519_key
+      NARAEN_TLS_CERT_FILE: /etc/naraen/tls.crt
+      NARAEN_TLS_KEY_FILE: /etc/naraen/tls.key
       NARAEN_SNAPSHOT_FILE: /etc/naraen/snapshot.json
       NARAEN_SNAPSHOT_MAX_AGE: 87600h  # the static snapshot is loaded once and never re-synced
+      NARAEN_S3_BUCKET: naraen-dev
+      NARAEN_S3_ENDPOINT: http://127.0.0.1:8333
+      # The signer's public development credentials, from a file as in any
+      # deployment without an instance role.
+      AWS_REGION: us-east-1
+      AWS_SHARED_CREDENTIALS_FILE: /etc/naraen/aws-credentials
+      AWS_EC2_METADATA_DISABLED: "true"
     volumes:
       - ./test/testdata/snapshot.json:/etc/naraen/snapshot.json:ro
-    ports:
-      - "127.0.0.1:2222:2222"
-      - "127.0.0.1:8443:8443"
+      - ./test/testdata/seaweedfs/aws-credentials:/etc/naraen/aws-credentials:ro
+      - ./test/testdata/devkeys/ssh_host_ed25519_key:/etc/naraen/ssh_host_ed25519_key:ro
+      - ./test/testdata/devkeys/tls.crt:/etc/naraen/tls.crt:ro
+      - ./test/testdata/devkeys/tls.key:/etc/naraen/tls.key:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -36,6 +85,26 @@ services:
       # distroless has no shell or curl; the binary is not an HTTP client, so
       # readiness is checked from outside by compose --wait via the TCP port.
       test: ["NONE"]
+
+  # The devcontainer (.devcontainer/devcontainer.json), in the server's
+  # network namespace, so the README walkthrough and the integration tests
+  # reach SSH, HTTPS and S3 on 127.0.0.1 exactly as from the host. Profile dev
+  # keeps a plain `docker compose up` from building the toolchain image;
+  # naming it (`docker compose run --rm dev task check`) starts it.
+  dev:
+    profiles: [dev]
+    build:
+      context: .
+      target: dev
+    network_mode: service:s3
+    command: ["sleep", "infinity"]
+    security_opt: ["seccomp=unconfined"]
+    environment:
+      GOFLAGS: -mod=readonly
+    volumes:
+      - .:/workspaces/naraen
+      - gomod:/go/pkg
+      - gocache:/home/vscode/.cache
 
   # ---- DAST tools (profile "dast") ----
   zap-api:
@@ -93,3 +162,5 @@ services:
 
 volumes:
   s3-data:
+  gomod:
+  gocache:

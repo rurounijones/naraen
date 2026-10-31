@@ -72,6 +72,10 @@ tasks:
     desc: Access matrix with real clients against the built server, with a local S3
     cmds: [go test -tags integration -count=1 ./test/integration/...]
 
+  smoke:
+    desc: Push and pull with real clients against the running compose stack (docker compose up -d)
+    cmds: [scripts/smoke.sh]
+
   bench:
     desc: Benchmarks
     cmds: [go test -run='^$' -bench=. -benchmem ./...]

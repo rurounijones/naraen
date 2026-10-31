@@ -1,29 +1,22 @@
 {
   "name": "naraen",
-  "build": {
-    "dockerfile": "../Dockerfile",
-    "context": "..",
-    "target": "dev"
-  },
-  "runArgs": ["--security-opt=seccomp=unconfined"],
+  // The dev service of docker-compose.yml, started with the whole local stack
+  // (SeaweedFS, its bucket, and the server) and sharing the server's network
+  // namespace: SSH, HTTPS and S3 are on localhost here as on the host, where
+  // compose also publishes them on 127.0.0.1.
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "dev",
+  "runServices": ["s3", "s3-init", "naraen", "dev"],
+  "shutdownAction": "stopCompose",
   "remoteUser": "vscode",
   "workspaceFolder": "/workspaces/naraen",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/naraen,type=bind",
-  "mounts": [
-    "source=naraen-gomod,target=/go/pkg,type=volume",
-    "source=naraen-gocache,target=/home/vscode/.cache,type=volume"
-  ],
   "features": {
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
-  "forwardPorts": [2222, 8443, 8333],
   "portsAttributes": {
     "2222": { "label": "SSH (LFS authenticate)" },
     "8443": { "label": "HTTPS (Batch API)" },
     "8333": { "label": "S3 (SeaweedFS)" }
-  },
-  "containerEnv": {
-    "GOFLAGS": "-mod=readonly"
   },
   "postCreateCommand": "sudo chown -R vscode: /go/pkg /home/vscode/.cache && go mod download && go -C tools mod download && pre-commit install",
   "customizations": {

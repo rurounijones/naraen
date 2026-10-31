@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Needs jq on the host.
+# Needs jq, git, git-lfs and ssh on the host.
 # Dynamic security testing against the real server running under compose.
 # Every tool is a blocking gate: any finding at or above the configured level
 # fails the script. Requires Docker.
@@ -10,10 +10,19 @@ compose=(docker compose -f docker-compose.yml)
 mkdir -p dast-reports
 chmod 777 dast-reports # ZAP runs as a non-root user
 
-cleanup() { "${compose[@]}" --profile dast down -v --remove-orphans >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+# A stack that was already up (the developer's, or the devcontainer's own,
+# which shares its network namespace) is left running; one this script
+# started is removed again.
+if [ -z "$("${compose[@]}" ps -q s3)" ]; then
+  cleanup() { "${compose[@]}" --profile dast down -v --remove-orphans >/dev/null 2>&1 || true; }
+  trap cleanup EXIT
+fi
 
 "${compose[@]}" up -d --build --wait naraen
+
+# The stack must work end to end before it is scanned: a server that failed
+# to reach its storage would hide every finding behind the Batch API.
+scripts/smoke.sh
 
 # HTTPS: ZAP API scan from the OpenAPI spec, then a baseline scan.
 "${compose[@]}" --profile dast run --rm zap-api

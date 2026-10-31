@@ -22,6 +22,7 @@ The first release has not been cut yet, so everything so far is listed as added.
 - An audit record for every SSH sign-in, refusal and token issued.
 - Optional OTLP export (`NARAEN_OTLP_ENDPOINT`) of metrics and logs.
 - SSH connection limits per source and in total, including a rate limit configurable with `NARAEN_SSH_CONN_BURST` and `NARAEN_SSH_CONN_INTERVAL`.
+- A local stack from `docker compose up`, with S3-compatible storage. Its public development keys and secrets are refused outside development mode.
 - Static Linux binaries and a container image for amd64 and arm64, both signed with cosign, with SBOMs and GitHub build provenance. Releases are made only from `main` after every gate passes.
 
 [Unreleased]: https://github.com/rurounijones/naraen/commits/main

@@ -83,7 +83,7 @@ All security gates are blocking in CI.
 
 Everything runs in a container; no host Go toolchain is required.
 
-1. Open the repo in VS Code and choose **Reopen in Container** (builds the `dev` stage of the `Dockerfile`), or build it yourself: `docker build --target dev -t naraen-dev .`
+1. Open the repo in VS Code and choose **Reopen in Container**. The devcontainer is the `dev` service of `docker-compose.yml`, and it starts the whole local stack with it (below). Without VS Code, `docker compose run --rm dev task <name>` runs a task in the same container.
 2. Run tasks with [go-task](https://taskfile.dev): `task --list`.
 
 | Task | Purpose |
@@ -93,24 +93,38 @@ Everything runs in a container; no host Go toolchain is required.
 | `task test`, `task cover` | Unit tests, line and branch coverage gates |
 | `task fuzz`, `task mutation` | Fuzzing (`FUZZTIME=5m`) and mutation testing |
 | `task integration` | The access matrix with real git, git-lfs and OpenSSH against the built server and a signature-checking local S3 (`docker compose up -d s3`), plus upload-integrity checks of the signed links |
+| `task smoke` | The walkthrough below, against the running compose stack |
 | `task image`, `task scan`, `task dast` | Build the runtime image, scan it, run DAST |
 | `task build`, `task release-check` | Release binaries for this platform, or validate the release config and build every target, in `dist/` |
 
 ### Try it locally
 
-`docker compose up naraen` starts the server in development mode. It loads `test/testdata/snapshot.json`, which accepts the two committed development keys in `test/testdata/devkeys/`: `writer` may upload and download `example/repo`, and `reader` may only download. The keys are public on purpose, and only that snapshot accepts them.
+`docker compose up -d` (or opening the devcontainer) starts a working server with storage:
+
+- SeaweedFS as S3 on `127.0.0.1:8333`, checking signatures, with the bucket `naraen-dev` created.
+- The server in development mode, with SSH on `localhost:2222` and the Batch API on `https://localhost:8443`. It loads `test/testdata/snapshot.json`, which accepts the two committed development keys in `test/testdata/devkeys/`: `writer` may upload and download `example/repo`, and `reader` may only download. Its SSH host key and TLS certificate are committed beside them. All of these are public on purpose, and the server refuses them outside development mode.
+
+The server, SeaweedFS and the devcontainer share one network namespace, and compose publishes its ports on the host's loopback, so these addresses are the same from the host and from the devcontainer. That matters for S3: a pre-signed link signs the S3 address, so the server must name S3 by an address its clients reach as well.
+
+`scripts/smoke.sh` (`task smoke`) is the walkthrough as a script. It pushes a new file as `writer`, clones and pulls it as `reader`, and checks that `reader` may not push. By hand, configure a repository like this:
 
 ```sh
-chmod 600 test/testdata/devkeys/writer
-ssh -p 2222 -i test/testdata/devkeys/writer -o IdentitiesOnly=yes git@localhost git-lfs-authenticate example/repo upload
-# {"href":"https://localhost:8443/example/repo","header":{"Authorization":"Bearer v1.dev...."},"expires_in":900}
+keys=$PWD/test/testdata/devkeys
+cp "$keys/writer" ~/.ssh/naraen-dev-writer && chmod 600 ~/.ssh/naraen-dev-writer
+echo "[localhost]:2222 $(cut -d' ' -f1,2 "$keys/ssh_host_ed25519_key.pub")" >> ~/.ssh/known_hosts
+
+cd your-repo
+git config lfs.url ssh://git@localhost:2222/example/repo
+git config http.sslCAInfo "$keys/tls.crt"
+git config http.sslBackend openssl   # Git for Windows only: git-lfs ignores sslCAInfo under schannel
+git config lfs.locksverify false
+git config core.sshCommand "ssh -i ~/.ssh/naraen-dev-writer -o IdentitiesOnly=yes"
+git lfs track '*.bin' && git add .gitattributes && git commit -m 'Track binaries'
 ```
 
-The host key is ephemeral in development mode, so ssh asks you to trust it on every restart.
+After that, `git push` uploads LFS objects and `git lfs pull` downloads them. On Windows, give `http.sslCAInfo` a `C:/...` path, because git-lfs cannot read Git Bash's `/c/...` form.
 
-The href in the answer comes from `NARAEN_PUBLIC_URL`, which defaults to localhost in development mode; set it to the name other machines reach the server by before trying from one.
-
-To use it from a repository, set `lfs.url` to `ssh://git@localhost:2222/example/repo`. Point `GIT_SSH_COMMAND` at the key, for example `ssh -i test/testdata/devkeys/writer -o IdentitiesOnly=yes`. The compose service has no storage configured, so `git lfs push` then authenticates and the Batch API answers 503 "storage not configured". `test/integration/lfs_test.go` shows a complete setup with SeaweedFS: a bucket, signer credentials and `NARAEN_S3_ENDPOINT`.
+The stack serves this machine only. The links point at `127.0.0.1`, and the Batch API's address comes from `NARAEN_PUBLIC_URL`, which defaults to localhost in development mode.
 
 ### Configuration
 

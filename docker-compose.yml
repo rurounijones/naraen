@@ -6,11 +6,12 @@
 # dev) runs in the same stack.
 #
 # Every container reaches the others by service name on the compose network:
-# SSH at naraen:2222, the Batch API at https://naraen:8443 and S3 at
-# http://s3:8333. Pre-signed links and the Batch API's href name those hosts,
-# so a client must resolve them too. Containers on the network do; to use the
-# stack from the host, where the ports are published on 127.0.0.1, add
-# "127.0.0.1 naraen s3" to the hosts file.
+# SSH at naraen:2222, the Batch API at https://naraen:8443, S3 at
+# http://s3:8333 and the dev OIDC issuer at http://oidc:8080. Pre-signed links,
+# the Batch API's href and the issuer's tokens name those hosts, so a client
+# must resolve them too. Containers on the network do; to use the stack from
+# the host, where the ports are published on 127.0.0.1, add
+# "127.0.0.1 naraen s3 oidc" to the hosts file.
 #
 # Nothing in the stack is bind-mounted from the repository, except into the
 # devcontainer itself. The devcontainer runs compose against the host's Docker
@@ -97,6 +98,23 @@ services:
     # HTTP client, so compose --wait waits for the container to run, and
     # scripts/dast.sh's walkthrough proves it serves.
 
+  # A development OIDC issuer standing in for GitHub Actions
+  # (cmd/naraen-dev-oidc), so CI jobs can be played from the client: a job
+  # asks http://oidc:8080/token?audience=naraen-dev&repository_id=1&repository=example/repo
+  # for a token and exchanges it at https://naraen:8443/example/repo/ci/token.
+  # The dev snapshot trusts its committed key for that audience, and the
+  # server refuses that trust outside development mode.
+  oidc:
+    build:
+      context: .
+      target: dev-oidc
+    environment:
+      NARAEN_DEV_OIDC_ISSUER: http://oidc:8080
+    ports: ["127.0.0.1:8080:8080"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
   # A developer's machine: git, git-lfs and ssh, with the dev keys and the dev
   # server's host key and certificate already trusted (the client stage of the
   # Dockerfile). `docker compose exec client bash`, then clone, track and push
@@ -105,7 +123,7 @@ services:
     build:
       context: .
       target: client
-    depends_on: [naraen]
+    depends_on: [naraen, oidc]
 
   # The devcontainer (.devcontainer/devcontainer.json). Profile dev keeps a
   # plain `docker compose up` from building the toolchain image; naming it

@@ -2,7 +2,8 @@
   "meta": {"provider": "file", "version": "dev", "synced_at": "2026-01-01T00:00:00Z"},
   "identities": [
     {"id": "writer", "kind": "person", "name": "Dev writer", "active": true},
-    {"id": "reader", "kind": "person", "name": "Dev reader", "active": true}
+    {"id": "reader", "kind": "person", "name": "Dev reader", "active": true},
+    {"id": "workload:1", "kind": "workload", "name": "CI for example/repo", "active": true}
   ],
   "keys": [
     {"fingerprint": "SHA256:3gzqoh0HmPR7wXovKf0R5jO41Aoyu2f06LgDx8LQY8s", "type": "ssh-ed25519", "identity_id": "writer"},
@@ -13,7 +14,16 @@
   ],
   "grants": [
     {"identity_id": "writer", "repo_id": "1", "level": "write"},
-    {"identity_id": "reader", "repo_id": "1", "level": "read"}
+    {"identity_id": "reader", "repo_id": "1", "level": "read"},
+    {"identity_id": "workload:1", "repo_id": "1", "level": "read"}
   ],
-  "trusts": []
+  "trusts": [
+    {
+      "issuer": "http://oidc:8080",
+      "audience": "naraen-dev",
+      "jwks": "{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"naraen-dev-oidc\",\"x\":\"JvNOU9RbmLBeQroGvqHsQE2Ms6JLC5rqhgU4Z1UKqLM\",\"y\":\"9VOaZYHDA4UTCIcfVNAdtKDJF0AS41-1fgRfwbPFwbk\"}]}",
+      "repo_claim": "repository_id",
+      "max_level": "read"
+    }
+  ]
 }

@@ -4,11 +4,11 @@ title = "naraen"
 useDefault = true
 
 # Only the committed development keys are allowed through: the client keys,
-# the server's SSH host key and its TLS key. They are public on purpose
+# the server's SSH host key, its TLS key and the dev OIDC issuer's key. They are public on purpose
 # (test/testdata/devkeys/README.md) and refused outside dev mode. Any
 # other secret, in any fixture folder, must still fail the scan.
 [allowlist]
 description = "Public development keys"
 paths = [
-  '''^test/testdata/devkeys/(reader|writer|ssh_host_ed25519_key|tls\.key)$''',
+  '''^test/testdata/devkeys/(reader|writer|ssh_host_ed25519_key|tls\.key|oidc\.key)$''',
 ]

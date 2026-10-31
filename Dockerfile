@@ -156,9 +156,24 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
       -ldflags "-s -w -linkmode=external -extldflags=-static-pie -X main.version=${VERSION}" -o /out/naraen ./cmd/naraen
 
 # ---------------------------------------------------------------------------
-# runtime: distroless, nonroot, no shell. The deployment binds 22 and 443 by
-# granting only CAP_NET_BIND_SERVICE; the image itself listens on high ports.
+# dev-oidc: cmd/naraen-dev-oidc, the development OIDC issuer that stands in
+# for GitHub Actions in docker-compose.yml, with its committed signing key.
+# Never released, and never built by the release recipe above.
 # ---------------------------------------------------------------------------
+FROM build AS dev-oidc-build
+ARG TARGETOS TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w"       -o /out/naraen-dev-oidc ./cmd/naraen-dev-oidc
+
+FROM ${RUNTIME_IMAGE} AS dev-oidc
+COPY --from=dev-oidc-build /out/naraen-dev-oidc /usr/local/bin/naraen-dev-oidc
+# --chmod also applies to the directory it creates, which must stay
+# searchable; the key is a public development value.
+COPY --chmod=755 test/testdata/devkeys/oidc.key /etc/naraen-dev-oidc/
+ENV NARAEN_DEV_OIDC_KEY_FILE=/etc/naraen-dev-oidc/oidc.key NARAEN_DEV_OIDC_ADDR=:8080
+EXPOSE 8080
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/naraen-dev-oidc"]
+
 # ---------------------------------------------------------------------------
 # runtime-dev: the runtime image plus the public development configuration
 # from test/testdata, for docker-compose.yml's naraen service. The files come
@@ -177,6 +192,10 @@ EXPOSE 2222 8443
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/naraen"]
 
+# ---------------------------------------------------------------------------
+# runtime: distroless, nonroot, no shell. The deployment binds 22 and 443 by
+# granting only CAP_NET_BIND_SERVICE; the image itself listens on high ports.
+# ---------------------------------------------------------------------------
 FROM ${RUNTIME_IMAGE} AS runtime
 COPY --from=build /out/naraen /usr/local/bin/naraen
 ENV NARAEN_SSH_ADDR=:2222 NARAEN_HTTPS_ADDR=:8443

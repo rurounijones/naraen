@@ -12,6 +12,8 @@ coverage.html
 *.key
 # The public development TLS key, refused outside dev mode.
 !/test/testdata/devkeys/tls.key
+# The public development OIDC issuer key, refused outside dev mode.
+!/test/testdata/devkeys/oidc.key
 .vscode/
 .idea/
 .DS_Store

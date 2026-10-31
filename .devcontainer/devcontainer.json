@@ -1,11 +1,11 @@
 {
   "name": "naraen",
   // The dev service of docker-compose.yml, started with the whole local stack:
-  // SeaweedFS and its bucket, the server, and client, a developer's machine
-  // to try it from. On the compose network the server is naraen and S3 is s3.
+  // SeaweedFS and its bucket, the server, a dev OIDC issuer standing in for
+  // GitHub Actions, and client, a developer's machine to try it from. On the compose network the server is naraen and S3 is s3.
   "dockerComposeFile": "../docker-compose.yml",
   "service": "dev",
-  "runServices": ["s3", "s3-init", "naraen", "client", "dev"],
+  "runServices": ["s3", "s3-init", "naraen", "oidc", "client", "dev"],
   "shutdownAction": "stopCompose",
   "remoteUser": "vscode",
   "workspaceFolder": "/workspaces/naraen",
@@ -15,7 +15,8 @@
   "portsAttributes": {
     "2222": { "label": "SSH (LFS authenticate)" },
     "8443": { "label": "HTTPS (Batch API)" },
-    "8333": { "label": "S3 (SeaweedFS)" }
+    "8333": { "label": "S3 (SeaweedFS)" },
+    "8080": { "label": "Dev OIDC issuer" }
   },
   "postCreateCommand": "sudo chown -R vscode: /go/pkg /home/vscode/.cache && go mod download && go -C tools mod download && pre-commit install",
   "customizations": {

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -269,6 +270,33 @@ const (
 	devCertSHA256         = "1e48fa9e62e5570c61c70b28567195cf5d8ff50fda5dec5d9ba9fffc350130e2"
 )
 
+// devOIDCKeyX is the x coordinate (base64url) of the development OIDC issuer's
+// signing key, test/testdata/devkeys/oidc.key, which cmd/naraen-dev-oidc signs
+// CI tokens with. Its private half is public, so a snapshot whose trust
+// entries hold it is refused outside dev mode: anyone could mint CI tokens it
+// accepts. TestDevSnapshotFixture keeps it in step with the key file.
+const devOIDCKeyX = "JvNOU9RbmLBeQroGvqHsQE2Ms6JLC5rqhgU4Z1UKqLM" // gitleaks:allow -- a public key coordinate, not a secret
+
+// trustsDevOIDCKey reports whether any trust entry's JWKS holds the
+// development OIDC key.
+func trustsDevOIDCKey(snap *datastore.Snapshot) bool {
+	for _, t := range snap.Trusts() {
+		var set struct {
+			Keys []struct {
+				X string `json:"x"`
+			} `json:"keys"`
+		}
+		// ParseSnapshot has already checked that every JWKS parses.
+		_ = json.Unmarshal([]byte(t.JWKS), &set)
+		for _, k := range set.Keys {
+			if k.X == devOIDCKeyX {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func loadSnapshot(store *datastore.Store, path string, dev bool) error {
 	// Freshness counts from before the file is read, as for any sync.
 	start := store.StartSync()
@@ -286,6 +314,9 @@ func loadSnapshot(store *datastore.Store, path string, dev bool) error {
 			if _, ok := snap.KeyHolder(fp); ok {
 				return fmt.Errorf("snapshot file: lists the public development key %s, which is accepted only when NARAEN_DEV=true", fp)
 			}
+		}
+		if trustsDevOIDCKey(snap) {
+			return errors.New("snapshot file: trusts the public development OIDC key, which is accepted only when NARAEN_DEV=true")
 		}
 	}
 	return store.Swap(start, snap)

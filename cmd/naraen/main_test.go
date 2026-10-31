@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -455,6 +459,83 @@ func TestDevSnapshotFixture(t *testing.T) {
 	want := slices.Sorted(slices.Values(devKeyFingerprints))
 	if !slices.Equal(fingerprints, want) {
 		t.Errorf("devKeyFingerprints = %v, key files hold %v", want, fingerprints)
+	}
+}
+
+// TestDevOIDCTrust holds the dev issuer's committed key, the trust entry in
+// the dev snapshot and devOIDCKeyX together, and proves that a snapshot
+// trusting that key is refused outside dev mode even when it lists none of
+// the dev SSH keys, while one trusting any other key is not.
+func TestDevOIDCTrust(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "testdata", "devkeys", "oidc.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		t.Fatal("oidc.key: no PEM block")
+	}
+	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec, ok := k.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("oidc.key holds %T", k)
+	}
+	point, err := ec.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x := base64.RawURLEncoding.EncodeToString(point[1:33]); x != devOIDCKeyX {
+		t.Errorf("oidc.key has x %s, devOIDCKeyX is %s", x, devOIDCKeyX)
+	}
+
+	devSnapshot, err := os.ReadFile(filepath.Join("..", "..", "test", "testdata", "snapshot.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data datastore.Data
+	if err := json.Unmarshal(devSnapshot, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Trusts) != 1 || !strings.Contains(data.Trusts[0].JWKS, devOIDCKeyX) {
+		t.Fatalf("dev snapshot trusts = %+v", data.Trusts)
+	}
+	// Without the dev SSH keys, only the trust entry can trip the refusal.
+	data.Keys = nil
+	snapshotFile := func(d datastore.Data) string {
+		b, err := json.Marshal(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return write(t, "snapshot.json", b)
+	}
+	trustsDev := snapshotFile(data)
+	if err := loadSnapshot(datastore.NewStore(time.Hour, datastore.DefaultLimits), trustsDev, false); err == nil || !strings.Contains(err.Error(), "development OIDC key") {
+		t.Errorf("dev OIDC trust outside dev mode: %v", err)
+	}
+	if err := loadSnapshot(datastore.NewStore(time.Hour, datastore.DefaultLimits), trustsDev, true); err != nil {
+		t.Errorf("dev OIDC trust in dev mode: %v", err)
+	}
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := other.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwks, err := json.Marshal(map[string]any{"keys": []map[string]string{{
+		"kty": "EC", "crv": "P-256", "kid": "other",
+		"x": base64.RawURLEncoding.EncodeToString(p[1:33]), "y": base64.RawURLEncoding.EncodeToString(p[33:]),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data.Trusts[0].JWKS = string(jwks)
+	if err := loadSnapshot(datastore.NewStore(time.Hour, datastore.DefaultLimits), snapshotFile(data), false); err != nil {
+		t.Errorf("another issuer's key outside dev mode: %v", err)
 	}
 }
 

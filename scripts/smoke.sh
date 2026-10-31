@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Needs git, git-lfs and ssh.
+# Needs git, git-lfs, ssh and curl.
 # End-to-end check of the compose stack (docker compose up -d) with real
 # clients: the writer pushes a new LFS object through SSH authentication, the
 # Batch API and a signed S3 upload; the reader clones and pulls it back; the
-# reader's own push is refused. It is also the README's walkthrough.
+# reader's own push is refused. Then a CI job with no SSH key exchanges a
+# token from the dev OIDC issuer for a read-only LFS token, pulls over HTTPS,
+# and has its push refused. It is also the README's walkthrough.
 #
-# Runs anywhere that resolves the stack's service names naraen and s3: the
-# client container (as naraen-smoke), the devcontainer, or the host with
-# "127.0.0.1 naraen s3" in its hosts file.
+# Runs anywhere that resolves the stack's service names naraen, s3 and oidc:
+# the client container (as naraen-smoke), the devcontainer, or the host with
+# "127.0.0.1 naraen s3 oidc" in its hosts file.
 set -euo pipefail
 
 host=naraen
@@ -70,3 +72,31 @@ if ! grep -q 'request refused' push.log; then
   exit 1
 fi
 echo "reader's push refused: $(grep -m1 'request refused' push.log)"
+
+# CI, as a GitHub Actions job would: an OIDC token for this repository from
+# the issuer, exchanged for a read-only LFS token used over HTTPS.
+oidc="$(curl -fsS "http://oidc:8080/token?audience=naraen-dev&repository_id=1&repository=example/repo" | sed -E 's/.*"value":"([^"]+)".*/\1/')"
+lfs_header="$(curl -fsS --cacert "$keys/tls.crt" -X POST -H "Authorization: Bearer $oidc" "https://$host:8443/example/repo/ci/token" | sed -E 's/.*"Authorization":"([^"]+)".*/\1/')"
+case "$lfs_header" in Bearer\ ?*) ;; *) echo "the CI token exchange returned no token" >&2; exit 1 ;; esac
+https=(-c "lfs.url=https://$host:8443/example/repo" -c "http.extraHeader=Authorization: $lfs_header"
+  -c "http.sslCAInfo=$keys/tls.crt" -c http.sslBackend=openssl -c lfs.locksverify=false)
+GIT_LFS_SKIP_SMUDGE=1 git clone -q origin.git ci
+git -C ci "${https[@]}" lfs pull
+cmp src/asset.bin ci/asset.bin
+echo "CI job pulled the same bytes with an exchanged OIDC token"
+
+head -c 1024 /dev/urandom >ci/ci.bin
+git -C ci add ci.bin
+git -C ci -c user.name=smoke -c user.email=smoke@example.invalid commit -q -m ci
+# No prompt for other credentials may hide the refusal.
+if GIT_TERMINAL_PROMPT=0 git -C ci "${https[@]}" lfs push origin main >ci-push.log 2>&1; then
+  echo "the CI job's push was accepted" >&2
+  exit 1
+fi
+# The exchanged token is for downloads, so the Batch API answers 401.
+if ! grep -q 'unauthorized' ci-push.log; then
+  echo "the CI job's push failed for another reason:" >&2
+  cat ci-push.log >&2
+  exit 1
+fi
+echo "CI job's push refused: $(grep -m1 'unauthorized' ci-push.log)"

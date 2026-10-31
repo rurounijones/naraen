@@ -103,9 +103,10 @@ Everything runs in a container; no host Go toolchain is required.
 
 - `s3`: SeaweedFS on `http://s3:8333`, checking signatures, with the bucket `naraen-dev` created.
 - `naraen`: the server in development mode, with SSH on `naraen:2222` and the Batch API on `https://naraen:8443`. It loads `test/testdata/snapshot.json`, which accepts the two committed development keys in `test/testdata/devkeys/`: `writer` may upload and download `example/repo`, and `reader` may only download. Its SSH host key and TLS certificate are committed beside them. All of these are public on purpose, and the server refuses them outside development mode.
-- `client`: a developer's machine with git, git-lfs and ssh. It holds the dev keys (`writer` by default), and trusts the server's host key and certificate.
+- `oidc`: a development OIDC issuer on `http://oidc:8080` that stands in for GitHub Actions (`cmd/naraen-dev-oidc`). It signs ES256 tokens with GitHub's claims and a committed key, and the dev snapshot trusts that key for the audience `naraen-dev`, with a CI workload holding read access to `example/repo`. The server refuses that trust outside development mode.
+- `client`: a developer's machine with git, git-lfs, ssh and curl. It holds the dev keys (`writer` by default), and trusts the server's host key and certificate.
 
-A pre-signed link names the S3 host it was signed for, and the Batch API's address is the server's name. So every client must resolve `naraen` and `s3`, and every container on the compose network does.
+A pre-signed link names the S3 host it was signed for, and the Batch API's address is the server's name. So every client must resolve `naraen` and `s3` (and `oidc`, to play a CI job), and every container on the compose network does.
 
 Work as a developer from the client. Repositories carry the LFS address in a committed `.lfsconfig`:
 
@@ -121,11 +122,20 @@ git push origin main             # uploads art.psd through the server to S3
 cd .. && git clone ~/origin.git copy   # downloads it again
 ```
 
-`scripts/smoke.sh` does the same as a check, and adds that `reader` may not push. Run it in the client (`docker compose exec client naraen-smoke`) or in the devcontainer (`task smoke`). DAST runs it before scanning.
+A CI job has no SSH key. It gets an OIDC token from the issuer and exchanges it for a read-only LFS token, as a GitHub Actions job would:
+
+```sh
+oidc=$(curl -fsS 'http://oidc:8080/token?audience=naraen-dev&repository_id=1&repository=example/repo' | sed -E 's/.*"value":"([^"]+)".*/\1/')
+curl -fsS -X POST -H "Authorization: Bearer $oidc" https://naraen:8443/example/repo/ci/token
+# {"href":"https://naraen:8443/example/repo","header":{"Authorization":"Bearer v1.dev...."},"expires_in":900}
+git -c lfs.url=https://naraen:8443/example/repo -c "http.extraHeader=Authorization: Bearer v1.dev...." lfs pull
+```
+
+`scripts/smoke.sh` does the same as a check, and adds that `reader` and the CI job may not push. Run it in the client (`docker compose exec client naraen-smoke`) or in the devcontainer (`task smoke`). DAST runs it before scanning.
 
 Nothing in the stack is bind-mounted from the repository. Its configuration reaches the containers through image builds and SeaweedFS's own shell, and `task dast` streams each tool's inputs in and copies its reports out. So compose and DAST behave the same from the devcontainer, which runs them against the host's Docker, as from the host.
 
-To use the stack from the host instead, where compose publishes the ports on `127.0.0.1`, add `127.0.0.1 naraen s3` to the hosts file (`C:\Windows\System32\drivers\etc\hosts` on Windows). Then set up a repository the way the client image is set up: trust the host key (`[naraen]:2222` plus the key in `ssh_host_ed25519_key.pub`) and the certificate (`git config http.sslCAInfo`), and use the `writer` key with mode 600. On Windows, also set `git config http.sslBackend openssl`, because git-lfs ignores `sslCAInfo` under the default schannel backend, and give `sslCAInfo` a `C:/...` path, because git-lfs cannot read Git Bash's `/c/...` form.
+To use the stack from the host instead, where compose publishes the ports on `127.0.0.1`, add `127.0.0.1 naraen s3 oidc` to the hosts file (`C:\Windows\System32\drivers\etc\hosts` on Windows). Then set up a repository the way the client image is set up: trust the host key (`[naraen]:2222` plus the key in `ssh_host_ed25519_key.pub`) and the certificate (`git config http.sslCAInfo`), and use the `writer` key with mode 600. On Windows, also set `git config http.sslBackend openssl`, because git-lfs ignores `sslCAInfo` under the default schannel backend, and give `sslCAInfo` a `C:/...` path, because git-lfs cannot read Git Bash's `/c/...` form.
 
 ### Configuration
 

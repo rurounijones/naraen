@@ -458,6 +458,49 @@ func TestDevSnapshotFixture(t *testing.T) {
 	}
 }
 
+// TestDevServerIdentity holds the committed dev host key and TLS certificate
+// that compose serves with: both load in dev mode, and both are refused
+// otherwise, so a production server cannot be started with keys anyone can
+// read. The certificate must also cover every name the README and DAST use.
+func TestDevServerIdentity(t *testing.T) {
+	dir := filepath.Join("..", "..", "test", "testdata", "devkeys")
+	dev := config.Config{
+		Dev:            true,
+		SSHHostKeyFile: filepath.Join(dir, "ssh_host_ed25519_key"),
+		TLSCertFile:    filepath.Join(dir, "tls.crt"),
+		TLSKeyFile:     filepath.Join(dir, "tls.key"),
+	}
+	s, err := loadHostKey(dev, nil)
+	if err != nil || s == nil {
+		t.Fatalf("dev host key: %v", err)
+	}
+	if fp := ssh.FingerprintSHA256(s.PublicKey()); fp != devHostKeyFingerprint {
+		t.Errorf("host key file holds %s, devHostKeyFingerprint is %s", fp, devHostKeyFingerprint)
+	}
+	c, err := loadCertificate(dev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"localhost", "naraen", "127.0.0.1", "::1"} {
+		if err := leaf.VerifyHostname(host); err != nil {
+			t.Errorf("dev certificate: %v", err)
+		}
+	}
+
+	prod := dev
+	prod.Dev = false
+	if _, err := loadHostKey(prod, nil); err == nil || !strings.Contains(err.Error(), "development host key") {
+		t.Errorf("dev host key outside dev mode: %v", err)
+	}
+	if _, err := loadCertificate(prod, nil); err == nil || !strings.Contains(err.Error(), "development certificate") {
+		t.Errorf("dev certificate outside dev mode: %v", err)
+	}
+}
+
 func TestSSHLimits(t *testing.T) {
 	if got := sshLimits(config.Config{}); got != sshd.DefaultLimits {
 		t.Errorf("no overrides: %+v, want the defaults", got)

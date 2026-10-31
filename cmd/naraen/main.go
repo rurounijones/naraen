@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -197,6 +199,9 @@ func loadHostKey(cfg config.Config, random io.Reader) (ssh.Signer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("host key: %w", err)
 		}
+		if fp := ssh.FingerprintSHA256(s.PublicKey()); !cfg.Dev && fp == devHostKeyFingerprint {
+			return nil, fmt.Errorf("host key: %s is the public development host key, accepted only when NARAEN_DEV=true", fp)
+		}
 		return s, nil
 	}
 	_, priv, err := ed25519.GenerateKey(random)
@@ -215,6 +220,9 @@ func loadCertificate(cfg config.Config, random io.Reader) (tls.Certificate, erro
 		c, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
 			return tls.Certificate{}, fmt.Errorf("tls certificate: %w", err)
+		}
+		if sum := sha256.Sum256(c.Certificate[0]); !cfg.Dev && hex.EncodeToString(sum[:]) == devCertSHA256 {
+			return tls.Certificate{}, errors.New("tls certificate: this is the public development certificate, accepted only when NARAEN_DEV=true")
 		}
 		return c, nil
 	}
@@ -249,6 +257,17 @@ var devKeyFingerprints = []string{
 	"SHA256:3gzqoh0HmPR7wXovKf0R5jO41Aoyu2f06LgDx8LQY8s", // writer
 	"SHA256:nY3kj39hB+G2rfiakn6x9jIZiid3G3onHOpaJTzBVvo", // reader
 }
+
+// devHostKeyFingerprint and devCertSHA256 identify the development SSH host
+// key and TLS certificate committed beside the dev keys, so that compose
+// keeps one host identity across restarts and clients can trust it once.
+// Their private halves are public, so outside dev mode either one is
+// refused: a production server using them could be impersonated by anyone
+// who reads the repo. TestDevServerIdentity keeps them in step with the files.
+const (
+	devHostKeyFingerprint = "SHA256:ece12yWlKcAsYMpwTau1lNvkQ5prkwdrUoIov2UX3vc"
+	devCertSHA256         = "1e48fa9e62e5570c61c70b28567195cf5d8ff50fda5dec5d9ba9fffc350130e2"
+)
 
 func loadSnapshot(store *datastore.Store, path string, dev bool) error {
 	// Freshness counts from before the file is read, as for any sync.

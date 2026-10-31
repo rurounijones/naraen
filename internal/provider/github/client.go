@@ -1,7 +1,6 @@
 package github
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -134,55 +133,47 @@ type Client struct {
 	Token   func(context.Context) (string, error)
 }
 
-// pages fetches path and every following page named by the Link header,
-// passing each body to fn. A next link must stay on BaseURL, so a response
-// cannot send the installation token anywhere else.
-func (c *Client) pages(ctx context.Context, path string, fn func(io.Reader) error) error {
-	next := c.BaseURL + path
-	for range maxPages {
-		body, link, err := c.get(ctx, next)
-		if err != nil {
-			return err
-		}
-		if err := fn(bytes.NewReader(body)); err != nil {
-			return fmt.Errorf("github: %s: %w", path, err)
-		}
-		next = nextLink(link)
-		if next == "" {
-			return nil
-		}
-		if !strings.HasPrefix(next, c.BaseURL+"/") {
-			return fmt.Errorf("github: %s: next page outside the API: %q", path, next)
-		}
-	}
-	return fmt.Errorf("github: %s: more than %d pages", path, maxPages)
+// response is one page as GitHub answered it.
+type response struct {
+	body       []byte
+	link, etag string
+	// notModified reports a 304 to a request that sent an ETag.
+	notModified bool
 }
 
-func (c *Client) get(ctx context.Context, u string) ([]byte, string, error) {
+// get reads u. With etag set it asks for the page only if it has changed
+// since, and a 304 comes back as notModified.
+func (c *Client) get(ctx context.Context, u, etag string) (response, error) {
 	tok, err := c.Token(ctx)
 	if err != nil {
-		return nil, "", err
+		return response{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("github: request: %w", err)
+		return response{}, fmt.Errorf("github: request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("github: get: %w", err)
+		return response{}, fmt.Errorf("github: get: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPage+1))
 	if err != nil || len(body) > maxPage {
-		return nil, "", errors.New("github: response too large or unreadable")
+		return response{}, errors.New("github: response too large or unreadable")
+	}
+	if resp.StatusCode == http.StatusNotModified && etag != "" {
+		return response{notModified: true}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("github: %s: status %d", req.URL.Path, resp.StatusCode)
+		return response{}, fmt.Errorf("github: %s: status %d", req.URL.Path, resp.StatusCode)
 	}
-	return body, resp.Header.Get("Link"), nil
+	return response{body: body, link: resp.Header.Get("Link"), etag: resp.Header.Get("ETag")}, nil
 }
 
 // nextLink returns the rel="next" URL of a Link header, or "".

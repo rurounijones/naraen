@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,8 @@ const (
 const maxJWKS = 1 << 20
 
 // Provider builds datastore snapshots from one GitHub organisation, as the
-// GitHub App installed on it sees it.
+// GitHub App installed on it sees it. FullSync must not run concurrently with
+// itself; provider.Run calls it from one goroutine.
 type Provider struct {
 	Client *Client
 	Org    string
@@ -41,6 +43,42 @@ type Provider struct {
 	JWKSURL string
 	// Now is replaceable in tests.
 	Now func() time.Time
+
+	cache caches
+}
+
+// caches holds one pageCache per listing a sync reads.
+type caches struct {
+	repos         pageCache[[]repoRef]
+	members       pageCache[[]datastore.Identity]
+	keys          pageCache[[]datastore.Key]
+	collaborators pageCache[[]datastore.Grant]
+	deployKeys    pageCache[repoData]
+}
+
+func (c *caches) begin() {
+	c.repos.begin()
+	c.members.begin()
+	c.keys.begin()
+	c.collaborators.begin()
+	c.deployKeys.begin()
+}
+
+func (c *caches) sweep() {
+	c.repos.sweep()
+	c.members.sweep()
+	c.keys.sweep()
+	c.collaborators.sweep()
+	c.deployKeys.sweep()
+}
+
+type repoRef struct{ id, fullName string }
+
+// repoData is what one repo adds to a snapshot beyond the repo itself.
+type repoData struct {
+	identities []datastore.Identity
+	keys       []datastore.Key
+	grants     []datastore.Grant
 }
 
 // Name identifies the provider in snapshot metadata and logs.
@@ -61,107 +99,150 @@ func DeployKeyID(keyID int64) string { return "gh-deploy-key-" + strconv.FormatI
 //     holding its current keys, and a workload identity with read on each
 //     repo.
 //
+// Members' keys and repos are read a few at a time (syncConcurrency), and
+// pages GitHub reports unchanged since the last sync are reused (pageCache).
+// The results are put together in the order GitHub listed them, whatever
+// order the requests finished in.
+//
 // Any failure fails the whole sync, so a partial view of the organisation is
 // never published; the store also validates the result against the live
 // snapshot before swapping it in.
 func (p *Provider) FullSync(ctx context.Context) (*datastore.Snapshot, error) {
+	p.cache.begin()
 	var d datastore.Data
 	d.Meta = datastore.Meta{Provider: p.Name(), SyncedAt: p.Now().UTC()}
-	type repoRef struct{ id, fullName string }
-	var repos []repoRef
-	err := p.Client.pages(ctx, "/installation/repositories?per_page=100", func(r io.Reader) error {
-		var page struct {
-			Repositories []struct {
-				ID       int64  `json:"id"`
-				FullName string `json:"full_name"`
-			} `json:"repositories"`
-		}
-		if err := json.NewDecoder(r).Decode(&page); err != nil {
-			return err
-		}
-		for _, repo := range page.Repositories {
-			if repo.ID == 0 || repo.FullName == "" {
-				return errors.New("repository missing id or name")
-			}
-			id := strconv.FormatInt(repo.ID, 10)
-			repos = append(repos, repoRef{id, repo.FullName})
-			d.Repos = append(d.Repos, datastore.Repo{ID: id, Path: strings.ToLower(repo.FullName)})
-		}
-		return nil
+	repoPages, err := fetch(ctx, p.Client, &p.cache.repos, "", "/installation/repositories?per_page=100", parseRepos)
+	if err != nil {
+		return nil, err
+	}
+	repos := slices.Concat(repoPages...)
+	for _, repo := range repos {
+		d.Repos = append(d.Repos, datastore.Repo{ID: repo.id, Path: strings.ToLower(repo.fullName)})
+	}
+	memberPages, err := fetch(ctx, p.Client, &p.cache.members, "", "/orgs/"+url.PathEscape(p.Org)+"/members?per_page=100", ParseMembers)
+	if err != nil {
+		return nil, err
+	}
+	members := slices.Concat(memberPages...)
+	d.Identities = append(d.Identities, members...)
+
+	keys := make([][]datastore.Key, len(members))
+	err = each(ctx, len(members), func(ctx context.Context, i int) error {
+		m := members[i]
+		pages, err := fetch(ctx, p.Client, &p.cache.keys, m.ID, "/users/"+url.PathEscape(m.Name)+"/keys?per_page=100",
+			func(r io.Reader) ([]datastore.Key, error) { return parseKeys(r, m.ID) })
+		keys[i] = slices.Concat(pages...)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := p.Client.pages(ctx, "/orgs/"+url.PathEscape(p.Org)+"/members?per_page=100", func(r io.Reader) error {
-		members, err := ParseMembers(r)
-		d.Identities = append(d.Identities, members...)
+	d.Keys = slices.Concat(keys...)
+
+	perRepo := make([]repoData, len(repos))
+	err = each(ctx, len(repos), func(ctx context.Context, i int) error {
+		var err error
+		perRepo[i], err = p.syncRepo(ctx, members, repos[i])
 		return err
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	for _, m := range d.Identities {
-		if err := p.Client.pages(ctx, "/users/"+url.PathEscape(m.Name)+"/keys?per_page=100", func(r io.Reader) error {
-			keys, err := parseKeys(r, m.ID)
-			d.Keys = append(d.Keys, keys...)
-			return err
-		}); err != nil {
-			return nil, err
-		}
-	}
-	members := append([]datastore.Identity(nil), d.Identities...)
-	for _, repo := range repos {
-		if err := p.syncRepo(ctx, &d, members, repo.id, repo.fullName); err != nil {
-			return nil, err
-		}
+	for _, r := range perRepo {
+		d.Identities = append(d.Identities, r.identities...)
+		d.Keys = append(d.Keys, r.keys...)
+		d.Grants = append(d.Grants, r.grants...)
 	}
 	if p.Audience != "" {
 		if err := p.addActions(ctx, &d); err != nil {
 			return nil, err
 		}
 	}
-	return datastore.NewSnapshot(d)
+	snap, err := datastore.NewSnapshot(d)
+	if err != nil {
+		return nil, err
+	}
+	// Only after a complete sync: a failed one may have stopped before
+	// using pages that are still current.
+	p.cache.sweep()
+	return snap, nil
 }
 
-// syncRepo adds a repo's member grants and deploy keys.
-func (p *Provider) syncRepo(ctx context.Context, d *datastore.Data, members []datastore.Identity, repoID, fullName string) error {
-	owner, name, _ := strings.Cut(fullName, "/")
-	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
-	if err := p.Client.pages(ctx, base+"/collaborators?affiliation=all&per_page=100", func(r io.Reader) error {
-		grants, err := ParseCollaborators(repoID, r)
-		d.Grants = append(d.Grants, MemberGrants(members, grants)...)
-		return err
-	}); err != nil {
-		return err
-	}
-	return p.Client.pages(ctx, base+"/keys?per_page=100", func(r io.Reader) error {
-		var page []struct {
+// parseRepos converts one page of GET /installation/repositories.
+func parseRepos(r io.Reader) ([]repoRef, error) {
+	var page struct {
+		Repositories []struct {
 			ID       int64  `json:"id"`
-			Key      string `json:"key"`
-			Title    string `json:"title"`
-			ReadOnly bool   `json:"read_only"`
+			FullName string `json:"full_name"`
+		} `json:"repositories"`
+	}
+	if err := json.NewDecoder(r).Decode(&page); err != nil {
+		return nil, err
+	}
+	out := make([]repoRef, 0, len(page.Repositories))
+	for _, repo := range page.Repositories {
+		if repo.ID == 0 || repo.FullName == "" {
+			return nil, errors.New("repository missing id or name")
 		}
-		if err := json.NewDecoder(r).Decode(&page); err != nil {
-			return err
+		out = append(out, repoRef{strconv.FormatInt(repo.ID, 10), repo.FullName})
+	}
+	return out, nil
+}
+
+// syncRepo reads a repo's member grants and deploy keys.
+func (p *Provider) syncRepo(ctx context.Context, members []datastore.Identity, repo repoRef) (repoData, error) {
+	owner, name, _ := strings.Cut(repo.fullName, "/")
+	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+	grantPages, err := fetch(ctx, p.Client, &p.cache.collaborators, repo.id, base+"/collaborators?affiliation=all&per_page=100",
+		func(r io.Reader) ([]datastore.Grant, error) { return ParseCollaborators(repo.id, r) })
+	if err != nil {
+		return repoData{}, err
+	}
+	keyPages, err := fetch(ctx, p.Client, &p.cache.deployKeys, repo.id, base+"/keys?per_page=100",
+		func(r io.Reader) (repoData, error) { return parseDeployKeys(r, repo.id) })
+	if err != nil {
+		return repoData{}, err
+	}
+	out := repoData{grants: MemberGrants(members, slices.Concat(grantPages...))}
+	for _, k := range keyPages {
+		out.identities = append(out.identities, k.identities...)
+		out.keys = append(out.keys, k.keys...)
+		out.grants = append(out.grants, k.grants...)
+	}
+	return out, nil
+}
+
+// parseDeployKeys converts one page of GET /repos/{owner}/{repo}/keys into an
+// identity per key, with read or write on repoID.
+func parseDeployKeys(r io.Reader, repoID string) (repoData, error) {
+	var page []struct {
+		ID       int64  `json:"id"`
+		Key      string `json:"key"`
+		Title    string `json:"title"`
+		ReadOnly bool   `json:"read_only"`
+	}
+	if err := json.NewDecoder(r).Decode(&page); err != nil {
+		return repoData{}, err
+	}
+	var out repoData
+	for _, k := range page {
+		if k.ID == 0 {
+			return repoData{}, errors.New("deploy key missing id")
 		}
-		for _, k := range page {
-			if k.ID == 0 {
-				return errors.New("deploy key missing id")
-			}
-			id := DeployKeyID(k.ID)
-			key, err := sshKey(k.Key, id)
-			if err != nil {
-				return err
-			}
-			level := datastore.LevelWrite
-			if k.ReadOnly {
-				level = datastore.LevelRead
-			}
-			d.Identities = append(d.Identities, datastore.Identity{ID: id, Kind: datastore.KindDeployKey, Name: k.Title, Active: true})
-			d.Keys = append(d.Keys, key)
-			d.Grants = append(d.Grants, datastore.Grant{IdentityID: id, RepoID: repoID, Level: level})
+		id := DeployKeyID(k.ID)
+		key, err := sshKey(k.Key, id)
+		if err != nil {
+			return repoData{}, err
 		}
-		return nil
-	})
+		level := datastore.LevelWrite
+		if k.ReadOnly {
+			level = datastore.LevelRead
+		}
+		out.identities = append(out.identities, datastore.Identity{ID: id, Kind: datastore.KindDeployKey, Name: k.Title, Active: true})
+		out.keys = append(out.keys, key)
+		out.grants = append(out.grants, datastore.Grant{IdentityID: id, RepoID: repoID, Level: level})
+	}
+	return out, nil
 }
 
 // addActions registers GitHub Actions as a workload issuer with its current

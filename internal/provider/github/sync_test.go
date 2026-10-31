@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,17 @@ type fakeGitHub struct {
 	status      map[string]int
 	tokenStatus int
 	tokenCalls  atomic.Int32
+	// With etags set, API pages carry an ETag and a matching If-None-Match
+	// is answered 304, as GitHub does; full and unchanged count each.
+	etags     bool
+	full      atomic.Int32
+	unchanged atomic.Int32
+	// inFlight and maxInFlight track concurrent API requests, each held
+	// for delay.
+	inFlight, maxInFlight atomic.Int32
+	delay                 time.Duration
+	// mu is held for reading while a request is served; see edit.
+	mu sync.RWMutex
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -50,7 +62,18 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	return f
 }
 
+// edit changes the fake while no request is being served, for a test that
+// changes it after a failed sync: the requests that sync cancelled may still
+// be arriving.
+func (f *fakeGitHub) edit(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn()
+}
+
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens" {
 		f.tokenCalls.Add(1)
 		if !f.validAppJWT(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
@@ -73,10 +96,24 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
+	raise(&f.maxInFlight, f.inFlight.Add(1))
+	defer f.inFlight.Add(-1)
+	time.Sleep(f.delay)
 	body, ok := f.routes[key]
 	if !ok {
 		http.Error(w, "not found: "+key, http.StatusNotFound)
 		return
+	}
+	if f.etags {
+		sum := sha256.Sum256([]byte(body))
+		etag := fmt.Sprintf(`"%x"`, sum[:8])
+		if r.Header.Get("If-None-Match") == etag {
+			f.unchanged.Add(1)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		f.full.Add(1)
+		w.Header().Set("ETag", etag)
 	}
 	if l, ok := f.links[key]; ok {
 		w.Header().Set("Link", strings.ReplaceAll(l, "BASE", f.URL))
@@ -85,6 +122,16 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(s)
 	}
 	_, _ = w.Write([]byte(body))
+}
+
+// raise sets v to n if n is larger.
+func raise(v *atomic.Int32, n int32) {
+	for {
+		m := v.Load()
+		if n <= m || v.CompareAndSwap(m, n) {
+			return
+		}
+	}
 }
 
 // validAppJWT checks the App JWT the way GitHub does: RS256 with the App's

@@ -110,13 +110,25 @@ paths:
   /webhooks/github:
     post:
       summary: GitHub webhook; body is authenticated by X-Hub-Signature-256
+      # The examples are a deploy_key deleted delivery for a key no identity
+      # holds, whose private half was discarded, so DAST reaches the removal
+      # path without revoking anything it needs (scripts/dast.sh). DAST
+      # replaces the signature with a real one for each body it sends.
       parameters:
-        - {name: X-Hub-Signature-256, in: header, required: true, schema: {type: string}}
+        - {name: X-GitHub-Event, in: header, required: true, example: deploy_key, schema: {type: string}}
+        - {name: X-Hub-Signature-256, in: header, required: true, example: "sha256=0000000000000000000000000000000000000000000000000000000000000000", schema: {type: string}}
       requestBody:
         required: true
         content:
           application/json:
-            schema: {type: object}
+            schema:
+              type: object
+              properties:
+                action: {type: string, example: deleted}
+                key:
+                  type: object
+                  properties:
+                    key: {type: string, example: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExldjZPlCwBLcs8GBqz+H3HXGbjmWKpXXkRSPG9a2LL"}
       description: >-
         Served only when a webhook secret is configured. organization
         member_removed, member removed and deploy_key deleted remove access

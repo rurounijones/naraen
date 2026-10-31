@@ -61,7 +61,9 @@ report() { docker cp -q "$("${dast[@]}" ps -aq "$1"):$2" dast-reports/; }
 # .zap/auth_hook.py makes ZAP send it: for the Batch API, the writer's token
 # for example/repo, minted over SSH from the client like any developer's; for
 # the CI token exchange, an OIDC token for example/repo from the dev issuer,
-# as a CI job gets one. Both reach the ZAP container's environment, never a
+# as a CI job gets one; for the GitHub webhook, a signature over each body
+# with the dev webhook secret, as GitHub signs deliveries. The tokens reach
+# the ZAP container's environment and the secret its work directory, never a
 # file in dast-reports, which CI uploads.
 token="$("${compose[@]}" exec -T client ssh naraen git-lfs-authenticate example/repo upload | jq -r .header.Authorization)"
 case "$token" in Bearer\ ?*) ;; *) echo "no token from git-lfs-authenticate" >&2; exit 1 ;; esac
@@ -71,7 +73,7 @@ case "$oidc" in ey?*) ;; *) echo "no token from the dev OIDC issuer" >&2; exit 1
 export NARAEN_DAST_OIDC_TOKEN="Bearer $oidc"
 # ZAP requires /zap/wrk, which its image lacks, and writes its reports there.
 mkdir -p "$stage/zap-api/wrk" "$stage/zap-baseline/wrk" "$stage/ssh-audit/policy"
-cp api/openapi.yaml .zap/rules.tsv .zap/auth_hook.py "$stage/zap-api/wrk/"
+cp api/openapi.yaml .zap/rules.tsv .zap/auth_hook.py .zap/sign_webhook.js test/testdata/devkeys/webhook.secret "$stage/zap-api/wrk/"
 cp .zap/rules.tsv "$stage/zap-baseline/wrk/"
 cp .ssh-audit/naraen.policy "$stage/ssh-audit/policy/"
 since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -79,17 +81,19 @@ rc=0
 run zap-api "$stage/zap-api/wrk" /zap 1000 || rc=$?
 report zap-api /zap/wrk/zap-api.html
 [ "$rc" -eq 0 ] || exit "$rc"
-# The scan must have got past authentication at both endpoints: a token ZAP
-# failed to send, or one the server refused, would leave every request at a
-# 401 and the scan passing for the wrong reason.
+# The scan must have got past authentication at every endpoint: a credential
+# ZAP failed to send, or one the server refused, would leave every request at
+# a 401 and the scan passing for the wrong reason. A webhook delivery got past
+# its signature check when it was applied or refused only as malformed.
 logs="$("${compose[@]}" logs --no-log-prefix --since "$since" naraen)"
 issued="$(grep -c '"msg":"links issued".*"identity":"writer"' <<<"$logs" || true)"
 exchanged="$(grep -c '"msg":"token issued".*"identity":"workload:1"' <<<"$logs" || true)"
-if [ "$issued" -eq 0 ] || [ "$exchanged" -eq 0 ]; then
-  echo "the authenticated ZAP scan did not pass authentication: $issued Batch requests, $exchanged token exchanges" >&2
+signed="$(grep -cE '"msg":"webhook applied"|"msg":"webhook refused".*"reason":"malformed"' <<<"$logs" || true)"
+if [ "$issued" -eq 0 ] || [ "$exchanged" -eq 0 ] || [ "$signed" -eq 0 ]; then
+  echo "the authenticated ZAP scan did not pass authentication: $issued Batch requests, $exchanged token exchanges, $signed webhook deliveries" >&2
   exit 1
 fi
-echo "authenticated ZAP scan: $issued Batch requests and $exchanged CI token exchanges passed authentication"
+echo "authenticated ZAP scan: $issued Batch requests, $exchanged CI token exchanges and $signed webhook deliveries passed authentication"
 
 rc=0
 run zap-baseline "$stage/zap-baseline/wrk" /zap 1000 || rc=$?

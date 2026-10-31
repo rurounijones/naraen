@@ -76,7 +76,7 @@ All security gates are blocking in CI.
 | SCA | govulncheck, OSV-Scanner, Dependabot, dependency review |
 | Secrets | gitleaks |
 | Container | Trivy, hadolint; distroless nonroot runtime image |
-| DAST | ZAP (API scan authenticated with a dev LFS token and a dev OIDC token, and baseline), Nuclei, testssl.sh, ssh-audit |
+| DAST | ZAP (API scan authenticated with a dev LFS token, a dev OIDC token and webhook deliveries signed with the dev secret, and baseline), Nuclei, testssl.sh, ssh-audit |
 | Supply chain | OpenSSF Scorecard, actions pinned by SHA; releases only from main after every gate passes; static-PIE binaries and a multi-arch image, both signed with cosign, with SBOMs and GitHub build provenance |
 
 ## Development

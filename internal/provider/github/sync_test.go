@@ -93,8 +93,11 @@ func (f *fakeGitHub) edit(fn func()) {
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens" {
+	if r.Method == http.MethodPost && r.URL.Path == tokenPath {
 		f.tokenCalls.Add(1)
+		if f.refused(w, tokenPath) {
+			return
+		}
 		if !f.validAppJWT(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
 			http.Error(w, "bad jwt", http.StatusUnauthorized)
 			return
@@ -105,6 +108,15 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	key := r.URL.RequestURI()
 	if key == "/jwks" {
+		// Public keys, off the API: the installation token must not be
+		// sent here.
+		if r.Header.Get("Authorization") != "" {
+			http.Error(w, "credentials sent off the API", http.StatusBadRequest)
+			return
+		}
+		if f.refused(w, key) {
+			return
+		}
 		if s, ok := f.status[key]; ok {
 			w.WriteHeader(s)
 		}
@@ -118,12 +130,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	raise(&f.maxInFlight, f.inFlight.Add(1))
 	defer f.inFlight.Add(-1)
 	time.Sleep(f.delay)
-	if ref, ok := f.refuse(key); ok {
-		for k, v := range ref.header {
-			w.Header().Set(k, v)
-		}
-		w.WriteHeader(ref.status)
-		_, _ = w.Write([]byte(ref.body))
+	if f.refused(w, key) {
 		return
 	}
 	body, ok := f.routes[key]
@@ -151,17 +158,25 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-// refuse counts a request for key and takes its next refusal, if any.
-func (f *fakeGitHub) refuse(key string) (refusal, bool) {
+const tokenPath = "/app/installations/99/access_tokens" // #nosec G101 -- a URL path, not a credential
+
+// refused counts a request for key and serves its next refusal, if any,
+// reporting whether it did.
+func (f *fakeGitHub) refused(w http.ResponseWriter, key string) bool {
 	f.limitMu.Lock()
 	defer f.limitMu.Unlock()
 	f.hits[key]++
 	rs := f.limits[key]
 	if len(rs) == 0 {
-		return refusal{}, false
+		return false
 	}
 	f.limits[key] = rs[1:]
-	return rs[0], true
+	for k, v := range rs[0].header {
+		w.Header().Set(k, v)
+	}
+	w.WriteHeader(rs[0].status)
+	_, _ = w.Write([]byte(rs[0].body))
+	return true
 }
 
 // hitsFor returns how many API requests for key arrived.
@@ -469,6 +484,25 @@ func TestAppAuthFailures(t *testing.T) {
 	a.BaseURL = broken.URL
 	if _, err := a.Token(context.Background()); err == nil {
 		t.Error("empty token accepted")
+	}
+	// A response exactly maxPage long is read; one byte more is refused.
+	var pad atomic.Int64
+	pad.Store(int64(maxPage - len(`{"token":"t","pad":""}`)))
+	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"token":"t","pad":"` + strings.Repeat("x", int(pad.Load())) + `"}`))
+	}))
+	defer huge.Close()
+	a = base()
+	a.BaseURL = huge.URL
+	if tok, err := a.Token(context.Background()); err != nil || tok != "t" {
+		t.Errorf("token response at the limit: %q, %v", tok, err)
+	}
+	pad.Add(1)
+	a = base()
+	a.BaseURL = huge.URL
+	if _, err := a.Token(context.Background()); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("oversized token response: %v", err)
 	}
 }
 

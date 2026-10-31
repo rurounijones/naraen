@@ -109,6 +109,15 @@ func (a *AppAuth) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("github: installation token: %w", err)
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPage+1))
+	if err != nil || len(body) > maxPage {
+		return "", errors.New("github: installation token: response too large or unreadable")
+	}
+	// Returned as is, so the Client asking for the token waits it out like
+	// any other refusal.
+	if limited := rateLimit(resp, body, now); limited != nil {
+		return "", limited
+	}
 	if resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("github: installation token: status %d", resp.StatusCode)
 	}
@@ -116,7 +125,7 @@ func (a *AppAuth) Token(ctx context.Context) (string, error) {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxPage)).Decode(&out); err != nil || len(out.Token) == 0 {
+	if err := json.Unmarshal(body, &out); err != nil || len(out.Token) == 0 {
 		return "", errors.New("github: installation token: malformed response")
 	}
 	a.token, a.expires = out.Token, out.ExpiresAt
@@ -175,6 +184,9 @@ func Sleep(ctx context.Context, d time.Duration) error {
 type rateLimited struct {
 	path string
 	wait time.Duration
+	// backoff means GitHub named no wait, so the retry loop sets one from
+	// the attempt.
+	backoff bool
 }
 
 func (e *rateLimited) Error() string {
@@ -191,22 +203,49 @@ type response struct {
 	notModified bool
 }
 
-// get reads u. With etag set it asks for the page only if it has changed
-// since, and a 304 comes back as notModified.
-//
-// A request refused for the rate limit is retried after the wait GitHub asks
+// request is one GET for send.
+type request struct {
+	url, etag string
+	// public sends no credentials, for a document off the API.
+	public bool
+	// limit bounds the body.
+	limit int
+}
+
+// get reads u from the API as the installation. With etag set it asks for
+// the page only if it has changed since, and a 304 comes back as
+// notModified.
+func (c *Client) get(ctx context.Context, u, etag string) (response, error) {
+	return c.send(ctx, request{url: u, etag: etag, limit: maxPage})
+}
+
+// getPublic reads u without credentials, for documents served off the API
+// such as the Actions issuer's keys: the installation token must not reach
+// another host. It shares the API's rate-limit hold rather than keeping one
+// per host; a sync needs both to finish, so holding one back while the
+// other's limit runs out costs nothing.
+func (c *Client) getPublic(ctx context.Context, u string, limit int) ([]byte, error) {
+	resp, err := c.send(ctx, request{url: u, public: true, limit: limit})
+	return resp.body, err
+}
+
+// send makes r. A request refused for the rate limit, including the request
+// for the installation token it needs, is retried after the wait GitHub asks
 // for, at most maxRateLimitRetries times, and the wait holds back every
 // other request too: GitHub warns that an integration which keeps sending
 // requests while limited may be banned.
-func (c *Client) get(ctx context.Context, u, etag string) (response, error) {
+func (c *Client) send(ctx context.Context, r request) (response, error) {
 	for attempt := 0; ; attempt++ {
 		if err := c.awaitResume(ctx); err != nil {
 			return response{}, err
 		}
-		resp, err := c.do(ctx, u, etag, attempt)
+		resp, err := c.do(ctx, r)
 		var limited *rateLimited
 		if !errors.As(err, &limited) {
 			return resp, err
+		}
+		if limited.backoff {
+			limited.wait = time.Minute << attempt
 		}
 		resume := c.pause(ctx, limited.wait)
 		c.Log.WarnContext(ctx, "github rate limit: holding requests back",
@@ -261,59 +300,61 @@ func later(a, b time.Time) time.Time {
 	return b
 }
 
-// limitWait reports whether GitHub refused resp for its rate limit, and how
-// long to wait before retrying, in the order GitHub documents: the seconds
-// in Retry-After; else, with no requests remaining, until the reset time;
-// else a minute, doubling with each retry. A 429 is always a rate limit, but
-// a 403 only when its headers or message say so; otherwise it is a missing
-// permission and fails like any other status.
-func limitWait(resp *http.Response, body []byte, now time.Time, attempt int) (time.Duration, bool) {
+// rateLimit returns the refusal if GitHub refused resp for its rate limit,
+// else nil. The wait follows the order GitHub documents: the seconds in
+// Retry-After; else, with no requests remaining, until the reset time; else
+// a minute, doubling with each retry (backoff). A 429 is always a rate
+// limit, but a 403 only when its headers or message say so; otherwise it is
+// a missing permission and fails like any other status.
+func rateLimit(resp *http.Response, body []byte, now time.Time) *rateLimited {
 	h := resp.Header
 	exhausted := h.Get("X-RateLimit-Remaining") == "0"
 	if resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode != http.StatusForbidden ||
 		h.Get("Retry-After") == "" && !exhausted && !bytes.Contains(body, []byte("rate limit"))) {
-		return 0, false
+		return nil
 	}
+	limited := &rateLimited{path: resp.Request.URL.Path, backoff: true}
 	// 32 bits of seconds cannot overflow a Duration.
 	if s, err := strconv.ParseUint(h.Get("Retry-After"), 10, 32); err == nil {
-		return time.Duration(s) * time.Second, true
+		limited.wait, limited.backoff = time.Duration(s)*time.Second, false
+	} else if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); exhausted && err == nil {
+		limited.wait, limited.backoff = max(time.Unix(reset, 0).Sub(now), 0), false
 	}
-	if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); exhausted && err == nil {
-		return max(time.Unix(reset, 0).Sub(now), 0), true
-	}
-	return time.Minute << attempt, true
+	return limited
 }
 
-// do sends one request for get.
-func (c *Client) do(ctx context.Context, u, etag string, attempt int) (response, error) {
-	tok, err := c.Token(ctx)
-	if err != nil {
-		return response{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+// do sends r once for send.
+func (c *Client) do(ctx context.Context, r request) (response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
 	if err != nil {
 		return response{}, fmt.Errorf("github: request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
+	if !r.public {
+		tok, err := c.Token(ctx)
+		if err != nil {
+			return response{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
+	if r.etag != "" {
+		req.Header.Set("If-None-Match", r.etag)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return response{}, fmt.Errorf("github: get: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPage+1))
-	if err != nil || len(body) > maxPage {
-		return response{}, errors.New("github: response too large or unreadable")
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(r.limit)+1))
+	if err != nil || len(body) > r.limit {
+		return response{}, fmt.Errorf("github: %s: response too large or unreadable", req.URL.Path)
 	}
-	if resp.StatusCode == http.StatusNotModified && etag != "" {
+	if resp.StatusCode == http.StatusNotModified && r.etag != "" {
 		return response{notModified: true}, nil
 	}
-	if wait, ok := limitWait(resp, body, c.Now(), attempt); ok {
-		return response{}, &rateLimited{req.URL.Path, wait}
+	if limited := rateLimit(resp, body, c.Now()); limited != nil {
+		return response{}, limited
 	}
 	if resp.StatusCode != http.StatusOK {
 		return response{}, fmt.Errorf("github: %s: status %d", req.URL.Path, resp.StatusCode)

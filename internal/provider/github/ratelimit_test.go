@@ -61,7 +61,7 @@ func limitedProvider(t *testing.T, rs ...refusal) (*fakeGitHub, *Provider, *fake
 	f := newFakeGitHub(t)
 	f.organisation(t)
 	f.limits[membersPage] = rs
-	p := f.provider("")
+	p := f.provider("naraen-lfs")
 	clock := &fakeClock{now: syncNow}
 	p.Client.Now, p.Client.Sleep = clock.Now, clock.Sleep
 	return f, p, clock
@@ -210,6 +210,43 @@ func TestRefusalsThatAreNotRateLimits(t *testing.T) {
 				t.Errorf("retried: waited %v, %d requests", clock.waits(), f.hitsFor(membersPage))
 			}
 		})
+	}
+}
+
+// The installation token request and the Actions keys request wait out a
+// rate limit like the API pages do, and the keys request still carries no
+// credentials (the fake refuses one that does).
+func TestTokenAndKeysWaitOutRateLimits(t *testing.T) {
+	f, p, clock := limitedProvider(t)
+	f.limits[tokenPath] = []refusal{{http.StatusForbidden, map[string]string{"Retry-After": "45"}, ""}}
+	f.limits["/jwks"] = []refusal{{http.StatusTooManyRequests, nil, ""}}
+	snap, err := p.FullSync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := clock.waits(), []time.Duration{45 * time.Second, time.Minute}; !slices.Equal(got, want) {
+		t.Errorf("waited %v, want %v", got, want)
+	}
+	if n := f.tokenCalls.Load(); n != 2 {
+		t.Errorf("%d token requests, want 2", n)
+	}
+	if n := f.hitsFor("/jwks"); n != 2 {
+		t.Errorf("%d keys requests, want 2", n)
+	}
+	if len(snap.Trusts()) != 1 {
+		t.Errorf("trusts = %+v", snap.Trusts())
+	}
+}
+
+// A refused token request that is not a rate limit fails the sync at once.
+func TestTokenRefusedWithoutRateLimit(t *testing.T) {
+	f, p, clock := limitedProvider(t)
+	f.limits[tokenPath] = []refusal{{http.StatusForbidden, nil, `{"message":"Integration suspended"}`}}
+	if _, err := p.FullSync(context.Background()); err == nil || !strings.Contains(err.Error(), "installation token: status 403") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(clock.waits()) != 0 || f.tokenCalls.Load() != 1 {
+		t.Errorf("retried: waited %v, %d token requests", clock.waits(), f.tokenCalls.Load())
 	}
 }
 

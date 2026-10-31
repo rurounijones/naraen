@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -248,20 +247,12 @@ func parseDeployKeys(r io.Reader, repoID string) (repoData, error) {
 // addActions registers GitHub Actions as a workload issuer with its current
 // keys, and gives each repo's workload identity read access to that repo.
 // The keys are fetched here, by the provider, so verifying a CI token on the
-// request path never needs the network.
+// request path never needs the network. They are public and served off the
+// API, so the request carries no credentials.
 func (p *Provider) addActions(ctx context.Context, d *datastore.Data) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.JWKSURL, nil)
-	if err != nil {
-		return fmt.Errorf("github: jwks request: %w", err)
-	}
-	resp, err := p.Client.HTTP.Do(req)
+	jwks, err := p.Client.getPublic(ctx, p.JWKSURL, maxJWKS)
 	if err != nil {
 		return fmt.Errorf("github: jwks: %w", err)
-	}
-	defer resp.Body.Close()
-	jwks, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKS+1))
-	if err != nil || len(jwks) > maxJWKS || resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("github: jwks: status %d", resp.StatusCode)
 	}
 	d.Trusts = append(d.Trusts, datastore.WorkloadTrust{
 		Issuer: ActionsIssuer, Audience: p.Audience, JWKS: string(jwks),

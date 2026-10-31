@@ -3,21 +3,33 @@
 # Dynamic security testing against the real server running under compose.
 # Every tool is a blocking gate: any finding at or above the configured level
 # fails the script. Requires Docker.
+#
+# Nothing is bind-mounted. Each tool's inputs are streamed into its container
+# as a tar and its reports copied out through the Docker API, so the script
+# runs the same from the host and from inside the devcontainer, whose paths
+# the Docker host cannot see.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# Git Bash on Windows would rewrite container paths such as /src into C:/...
+# Git Bash on Windows would rewrite container paths such as /zap into C:/...
 export MSYS_NO_PATHCONV=1
 compose=(docker compose -f docker-compose.yml)
+dast=("${compose[@]}" --profile dast)
+tools=(zap-api zap-baseline testssl nuclei ssh-audit)
 mkdir -p dast-reports
-chmod 777 dast-reports # ZAP runs as a non-root user
+# Each tool's inputs are staged here before they are streamed in.
+stage="$(mktemp -d)"
 
 # A stack that was already up (the developer's, or the devcontainer's own) is
 # left running; one this script started is removed again.
-if [ -z "$("${compose[@]}" ps -q s3)" ]; then
-  cleanup() { "${compose[@]}" --profile dast down -v --remove-orphans >/dev/null 2>&1 || true; }
-  trap cleanup EXIT
-fi
+started=""
+[ -n "$("${compose[@]}" ps -q s3)" ] || started=1
+cleanup() {
+  rm -rf "$stage"
+  "${dast[@]}" rm -fsv "${tools[@]}" >/dev/null 2>&1 || true
+  if [ -n "$started" ]; then "${dast[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
 
 "${compose[@]}" up -d --build --wait naraen client
 
@@ -25,15 +37,45 @@ fi
 # to reach its storage would hide every finding behind the Batch API. The
 # walkthrough runs from the client container, which resolves the stack's
 # names without touching the host's hosts file.
-"${compose[@]}" exec -T client /src/scripts/smoke.sh
+"${compose[@]}" exec -T client naraen-smoke
+
+# run <service> [<dir> <container dir> <uid>]: creates the tool's container,
+# streams dir into container dir owned by uid (the tool's user, which may need
+# to write there), then runs it attached and returns its status.
+run() {
+  local svc="$1" id
+  "${dast[@]}" rm -fsv "$svc" >/dev/null 2>&1 || true
+  "${dast[@]}" create "$svc" >/dev/null 2>&1
+  id="$("${dast[@]}" ps -aq "$svc")"
+  if [ $# -gt 1 ]; then
+    tar -c --owner="$4" --group="$4" -C "$(dirname "$2")" "$(basename "$2")" | docker cp -a -q - "$id:$3"
+  fi
+  docker start -a "$id"
+}
+
+# report <service> <path>: copies a report out of the tool's container.
+report() { docker cp -q "$("${dast[@]}" ps -aq "$1"):$2" dast-reports/; }
 
 # HTTPS: ZAP API scan from the OpenAPI spec, then a baseline scan.
-"${compose[@]}" --profile dast run --rm zap-api
-"${compose[@]}" --profile dast run --rm zap-baseline
+# ZAP requires /zap/wrk, which its image lacks, and writes its reports there.
+mkdir -p "$stage/zap-api/wrk" "$stage/zap-baseline/wrk" "$stage/ssh-audit/policy"
+cp api/openapi.yaml .zap/rules.tsv "$stage/zap-api/wrk/"
+cp .zap/rules.tsv "$stage/zap-baseline/wrk/"
+cp .ssh-audit/naraen.policy "$stage/ssh-audit/policy/"
+rc=0
+run zap-api "$stage/zap-api/wrk" /zap 1000 || rc=$?
+report zap-api /zap/wrk/zap-api.html
+[ "$rc" -eq 0 ] || exit "$rc"
+
+rc=0
+run zap-baseline "$stage/zap-baseline/wrk" /zap 1000 || rc=$?
+report zap-baseline /zap/wrk/zap-baseline.html
+[ "$rc" -eq 0 ] || exit "$rc"
 
 # HTTPS: protocol and cipher posture (TLS 1.3 only, no weak suites).
 rm -f dast-reports/testssl.json
-"${compose[@]}" --profile dast run --rm testssl
+run testssl
+report testssl /tmp/testssl.json
 # Fail on any MEDIUM or worse finding. Certificate trust findings are expected
 # because the development certificate is self-signed.
 bad="$(jq -c '.[] | select((.severity=="MEDIUM" or .severity=="HIGH" or .severity=="CRITICAL") and (.id | startswith("cert") | not))' < dast-reports/testssl.json)"
@@ -47,7 +89,7 @@ fi
 # nuclei exits 0 even with findings, so any reported finding fails the run.
 # self-signed-ssl is excluded in the compose file: the development certificate
 # is self-signed by design.
-nuclei_out="$("${compose[@]}" --profile dast run --rm nuclei 2>&1)"
+nuclei_out="$(run nuclei 2>&1)"
 echo "$nuclei_out"
 if grep -Eq '^\[[^]]+\] \[[^]]+\] \[(info|low|medium|high|critical)\]' <<<"$nuclei_out"; then
   echo "nuclei reported findings" >&2
@@ -55,4 +97,4 @@ if grep -Eq '^\[[^]]+\] \[[^]]+\] \[(info|low|medium|high|critical)\]' <<<"$nucl
 fi
 
 # SSH: algorithm posture, checked against .ssh-audit/naraen.policy.
-"${compose[@]}" --profile dast run --rm ssh-audit
+run ssh-audit "$stage/ssh-audit/policy" / 0

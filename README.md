@@ -92,7 +92,7 @@ Everything runs in a container; no host Go toolchain is required.
 | `task ci` | `check` plus fuzz, mutation, integration, image scan and DAST |
 | `task test`, `task cover` | Unit tests, line and branch coverage gates |
 | `task fuzz`, `task mutation` | Fuzzing (`FUZZTIME=5m`) and mutation testing |
-| `task integration` | The access matrix with real git, git-lfs and OpenSSH against the built server and a signature-checking local S3 (`docker compose up -d s3`), plus upload-integrity checks of the signed links |
+| `task integration` | The access matrix with real git, git-lfs and OpenSSH against the built server and a signature-checking local S3 (`docker compose run --rm s3-init`, or the running stack), plus upload-integrity checks of the signed links |
 | `task smoke` | The walkthrough below, against the running compose stack |
 | `task image`, `task scan`, `task dast` | Build the runtime image, scan it, run DAST |
 | `task build`, `task release-check` | Release binaries for this platform, or validate the release config and build every target, in `dist/` |
@@ -121,7 +121,9 @@ git push origin main             # uploads art.psd through the server to S3
 cd .. && git clone ~/origin.git copy   # downloads it again
 ```
 
-`scripts/smoke.sh` (`task smoke`) does the same as a check, and adds that `reader` may not push. Run it in the client (`docker compose exec client /src/scripts/smoke.sh`, with the repository mounted at `/src`) or in the devcontainer. DAST runs it before scanning.
+`scripts/smoke.sh` does the same as a check, and adds that `reader` may not push. Run it in the client (`docker compose exec client naraen-smoke`) or in the devcontainer (`task smoke`). DAST runs it before scanning.
+
+Nothing in the stack is bind-mounted from the repository. Its configuration reaches the containers through image builds and SeaweedFS's own shell, and `task dast` streams each tool's inputs in and copies its reports out. So compose and DAST behave the same from the devcontainer, which runs them against the host's Docker, as from the host.
 
 To use the stack from the host instead, where compose publishes the ports on `127.0.0.1`, add `127.0.0.1 naraen s3` to the hosts file (`C:\Windows\System32\drivers\etc\hosts` on Windows). Then set up a repository the way the client image is set up: trust the host key (`[naraen]:2222` plus the key in `ssh_host_ed25519_key.pub`) and the certificate (`git config http.sslCAInfo`), and use the `writer` key with mode 600. On Windows, also set `git config http.sslBackend openssl`, because git-lfs ignores `sslCAInfo` under the default schannel backend, and give `sslCAInfo` a `C:/...` path, because git-lfs cannot read Git Bash's `/c/...` form.
 

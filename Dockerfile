@@ -97,21 +97,26 @@ WORKDIR /workspaces/naraen
 # with real clients. git, git-lfs and ssh, set up the way a developer would
 # be: the public development keys in ~/.ssh (writer by default), the dev
 # server's host key trusted, and its TLS certificate trusted by git.
-# docker-compose.yml runs it as the service client.
+# naraen-smoke runs scripts/smoke.sh. docker-compose.yml runs it as the
+# service client.
 # ---------------------------------------------------------------------------
 FROM ${GO_IMAGE} AS client
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git git-lfs openssh-client \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1000 --shell /bin/bash dev \
- && install -d -m 700 -o dev -g dev /home/dev/.ssh
-COPY --chown=dev:dev --chmod=600 test/testdata/devkeys/writer test/testdata/devkeys/reader /home/dev/.ssh/
-COPY test/testdata/devkeys/tls.crt test/testdata/devkeys/ssh_host_ed25519_key.pub /usr/local/share/naraen/
+ && install -d -m 700 -o dev -g dev /home/dev/.ssh \
+ && install -d -m 755 /usr/local/share/naraen/devkeys
+COPY --chmod=644 test/testdata/devkeys/writer test/testdata/devkeys/reader \
+     test/testdata/devkeys/tls.crt test/testdata/devkeys/ssh_host_ed25519_key.pub /usr/local/share/naraen/devkeys/
+COPY --chmod=755 scripts/smoke.sh /usr/local/bin/naraen-smoke
+ENV NARAEN_DEVKEYS=/usr/local/share/naraen/devkeys
 USER 1000:1000
 WORKDIR /home/dev
-RUN echo "[naraen]:2222 $(cut -d' ' -f1,2 /usr/local/share/naraen/ssh_host_ed25519_key.pub)" > ~/.ssh/known_hosts \
+RUN install -m 600 "${NARAEN_DEVKEYS}/writer" "${NARAEN_DEVKEYS}/reader" ~/.ssh/ \
+ && echo "[naraen]:2222 $(cut -d' ' -f1,2 "${NARAEN_DEVKEYS}/ssh_host_ed25519_key.pub")" > ~/.ssh/known_hosts \
  && printf 'Host naraen\n  Port 2222\n  User git\n  IdentityFile ~/.ssh/writer\n  IdentitiesOnly yes\n' > ~/.ssh/config \
- && git config --global http.sslCAInfo /usr/local/share/naraen/tls.crt \
+ && git config --global http.sslCAInfo "${NARAEN_DEVKEYS}/tls.crt" \
  && git config --global lfs.locksverify false \
  && git config --global init.defaultBranch main \
  && git config --global user.name "Dev" \
@@ -154,6 +159,24 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 # runtime: distroless, nonroot, no shell. The deployment binds 22 and 443 by
 # granting only CAP_NET_BIND_SERVICE; the image itself listens on high ports.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# runtime-dev: the runtime image plus the public development configuration
+# from test/testdata, for docker-compose.yml's naraen service. The files come
+# through the build context rather than bind mounts, so compose behaves the
+# same from inside the devcontainer, whose paths the Docker host cannot see.
+# It is never released: runtime, the last stage, is the default target.
+# ---------------------------------------------------------------------------
+FROM ${RUNTIME_IMAGE} AS runtime-dev
+COPY --from=build /out/naraen /usr/local/bin/naraen
+# --chmod also applies to the /etc/naraen directory it creates, which must stay
+# searchable; the files are public development values, readable by anyone.
+COPY --chmod=755 test/testdata/snapshot.json test/testdata/seaweedfs/aws-credentials \
+     test/testdata/devkeys/ssh_host_ed25519_key test/testdata/devkeys/tls.crt test/testdata/devkeys/tls.key /etc/naraen/
+ENV NARAEN_SSH_ADDR=:2222 NARAEN_HTTPS_ADDR=:8443
+EXPOSE 2222 8443
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/naraen"]
+
 FROM ${RUNTIME_IMAGE} AS runtime
 COPY --from=build /out/naraen /usr/local/bin/naraen
 ENV NARAEN_SSH_ADDR=:2222 NARAEN_HTTPS_ADDR=:8443

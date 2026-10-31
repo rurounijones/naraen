@@ -6,16 +6,17 @@
 # reader's own push is refused. It is also the README's walkthrough.
 #
 # Runs anywhere that resolves the stack's service names naraen and s3: the
-# client and dev containers, or the host with "127.0.0.1 naraen s3" in its
-# hosts file.
+# client container (as naraen-smoke), the devcontainer, or the host with
+# "127.0.0.1 naraen s3" in its hosts file.
 set -euo pipefail
 
 host=naraen
 # Native Windows git-lfs cannot open Git Bash's /c/... paths; pwd -W gives
 # C:/... there, which every tool here understands.
 abs() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
-root="$(abs "$(dirname "$0")/..")"
-keys="$root/test/testdata/devkeys"
+# The client image installs this script outside the repository and points
+# NARAEN_DEVKEYS at its copy of the dev keys.
+keys="${NARAEN_DEVKEYS:-$(abs "$(dirname "$0")/..")/test/testdata/devkeys}"
 work="$(abs "$(mktemp -d)")"
 trap 'rm -rf "$work"' EXIT
 cd "$work"

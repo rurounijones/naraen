@@ -34,7 +34,7 @@ import (
 	"github.com/rurounijones/naraen/internal/storage"
 )
 
-// The public development credentials of test/testdata/seaweedfs/s3.json.
+// The public development credentials that docker-compose.yml's s3-init gives SeaweedFS.
 // The admin identity creates buckets and checks what they hold; the server
 // signs with the signer identity, which may only read and write objects.
 const (
@@ -103,7 +103,7 @@ func s3Admin() *s3.Client {
 func newBucket(t *testing.T) string {
 	t.Helper()
 	if c, err := net.DialTimeout("tcp", s3Target, time.Second); err != nil {
-		t.Fatalf("S3 is not reachable at %s (start it with `docker compose up -d s3`): %v", s3Target, err)
+		t.Fatalf("S3 is not reachable at %s (start it with `docker compose run --rm s3-init`): %v", s3Target, err)
 	} else {
 		_ = c.Close()
 	}

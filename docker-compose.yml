@@ -11,6 +11,14 @@
 # so a client must resolve them too. Containers on the network do; to use the
 # stack from the host, where the ports are published on 127.0.0.1, add
 # "127.0.0.1 naraen s3" to the hosts file.
+#
+# Nothing in the stack is bind-mounted from the repository, except into the
+# devcontainer itself. The devcontainer runs compose against the host's Docker
+# (docker-outside-of-docker), which would resolve ./ against the host, where
+# /workspaces/naraen does not exist; worse, the differing paths would make
+# compose recreate services with broken mounts. Configuration goes into images
+# through the build context, which the Docker client uploads from wherever it
+# runs, or through SeaweedFS's own shell.
 name: naraen
 
 services:
@@ -18,16 +26,20 @@ services:
   # pullable images, so SeaweedFS stands in. Swap S3_IMAGE to change it.
   s3:
     image: ${S3_IMAGE:-chrislusf/seaweedfs:latest@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
-    # The identities file turns on signature checks; without it SeaweedFS
-    # serves anyone, and tests of signed links would prove nothing. The
-    # credentials in it are public development values.
-    command: ["server", "-s3", "-dir=/data", "-s3.config=/etc/seaweedfs/s3.json"]
+    # Identities and signature checks come from s3-init. Until it has run,
+    # SeaweedFS serves anyone, so everything that uses S3 waits for it.
+    command: ["server", "-s3", "-dir=/data"]
     ports: ["127.0.0.1:8333:8333"]
-    volumes: ["s3-data:/data", "./test/testdata/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro"]
+    volumes: ["s3-data:/data"]
 
-  # Creates the bucket the dev server maps example/repo to, then exits. It
-  # goes through SeaweedFS's own shell, so the signer identity needs no
-  # bucket-creation rights, as in production.
+  # Configures SeaweedFS through its own shell, then exits; idempotent. Two
+  # identities with public development credentials: admin, which the
+  # integration tests use to create and inspect buckets, and signer, which the
+  # server signs links with and which may only read and write objects, as the
+  # Signer role in production. Configuring any identity turns on signature
+  # checks, so tests of signed links prove something. Then the bucket the dev
+  # server stores objects in. `docker compose run --rm s3-init` prepares S3
+  # alone, as the integration workflow does.
   s3-init:
     image: ${S3_IMAGE:-chrislusf/seaweedfs:latest@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860}
     depends_on: [s3]
@@ -35,26 +47,32 @@ services:
     command:
       - |
         b=naraen-dev
-        weed() { echo "$$1" | /usr/bin/weed shell -master=s3:9333 2>&1; }
+        w() { echo "$$*" | /usr/bin/weed shell -master=s3:9333 2>&1; }
         for i in $$(seq 60); do
-          weed s3.bucket.list | grep -qw "$$b" && exit 0
-          weed "s3.bucket.create -name $$b"
+          w s3.configure -user=admin -access_key=naraen-dev-admin -secret_key=naraen-dev-admin-secret-not-for-production -actions=Admin,Read,Write,List,Tagging -apply >/dev/null
+          w s3.configure -user=signer -access_key=naraen-dev-signer -secret_key=naraen-dev-signer-secret-not-for-production -actions=Read,Write -apply >/dev/null
+          w s3.bucket.list | grep -qw "$$b" || w s3.bucket.create -name "$$b" >/dev/null
+          if w s3.configure | grep -q naraen-dev-signer && w s3.bucket.list | grep -qw "$$b"; then
+            exit 0
+          fi
           sleep 1
         done
-        echo "bucket $$b not created" >&2
+        echo "S3 not configured" >&2
         exit 1
 
   naraen:
     build:
       context: .
-      target: runtime
+      # The runtime image plus the development files from test/testdata.
+      target: runtime-dev
     depends_on:
       s3-init:
         condition: service_completed_successfully
     environment:
       # Development mode, with the committed public development host key, TLS
       # certificate and client keys (test/testdata/devkeys), which the server
-      # refuses outside it. The token key is ephemeral.
+      # refuses outside it. The token key is ephemeral. The files are in the
+      # image, under /etc/naraen.
       NARAEN_DEV: "true"
       NARAEN_SSH_HOST_KEY_FILE: /etc/naraen/ssh_host_ed25519_key
       NARAEN_TLS_CERT_FILE: /etc/naraen/tls.crt
@@ -71,32 +89,23 @@ services:
       AWS_REGION: us-east-1
       AWS_SHARED_CREDENTIALS_FILE: /etc/naraen/aws-credentials
       AWS_EC2_METADATA_DISABLED: "true"
-    volumes:
-      - ./test/testdata/snapshot.json:/etc/naraen/snapshot.json:ro
-      - ./test/testdata/seaweedfs/aws-credentials:/etc/naraen/aws-credentials:ro
-      - ./test/testdata/devkeys/ssh_host_ed25519_key:/etc/naraen/ssh_host_ed25519_key:ro
-      - ./test/testdata/devkeys/tls.crt:/etc/naraen/tls.crt:ro
-      - ./test/testdata/devkeys/tls.key:/etc/naraen/tls.key:ro
     ports: ["127.0.0.1:2222:2222", "127.0.0.1:8443:8443"]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    healthcheck:
-      # distroless has no shell or curl; the binary is not an HTTP client, so
-      # readiness is checked from outside by compose --wait via the TCP port.
-      test: ["NONE"]
+    # No healthcheck: distroless has no shell or curl, and the binary is not an
+    # HTTP client, so compose --wait waits for the container to run, and
+    # scripts/dast.sh's walkthrough proves it serves.
 
   # A developer's machine: git, git-lfs and ssh, with the dev keys and the dev
   # server's host key and certificate already trusted (the client stage of the
   # Dockerfile). `docker compose exec client bash`, then clone, track and push
-  # as a developer would; the repository is mounted read-only at /src, so
-  # `/src/scripts/smoke.sh` runs the walkthrough.
+  # as a developer would; `naraen-smoke` runs the walkthrough.
   client:
     build:
       context: .
       target: client
     depends_on: [naraen]
-    volumes: [".:/src:ro"]
 
   # The devcontainer (.devcontainer/devcontainer.json). Profile dev keeps a
   # plain `docker compose up` from building the toolchain image; naming it
@@ -118,46 +127,40 @@ services:
       - gocache:/home/vscode/.cache
 
   # ---- DAST tools (profile "dast") ----
+  # Run by scripts/dast.sh, which copies each tool's inputs in and its reports
+  # out through the Docker API instead of bind mounts (see the top of this
+  # file), and makes sure the server is up first.
   zap-api:
     profiles: [dast]
     image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
     command: >
-      zap-api-scan.py -t /zap/wrk/api/openapi.yaml -f openapi
-      -O https://naraen:8443 -c /zap/wrk/.zap/rules.tsv -r dast-reports/zap-api.html -I
-    volumes: [".:/zap/wrk:rw"]
-    depends_on: [naraen]
+      zap-api-scan.py -t /zap/wrk/openapi.yaml -f openapi
+      -O https://naraen:8443 -c /zap/wrk/rules.tsv -r zap-api.html -I
 
   zap-baseline:
     profiles: [dast]
     image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
     command: >
-      zap-baseline.py -t https://naraen:8443 -c /zap/wrk/.zap/rules.tsv
-      -r dast-reports/zap-baseline.html
-    volumes: [".:/zap/wrk:rw"]
-    depends_on: [naraen]
+      zap-baseline.py -t https://naraen:8443 -c /zap/wrk/rules.tsv
+      -r zap-baseline.html
 
   testssl:
     profiles: [dast]
     image: drwetter/testssl.sh:latest@sha256:9fc0395106bf1df9a20695d04d6fda09c56301cd62a63cb24aedaa27f991a1e4
     # Findings are written as JSON and judged by scripts/dast.sh, because
     # testssl.sh itself exits 0 whatever it finds.
-    command: ["--severity", "LOW", "-p", "-E", "-U", "-h", "-S", "--quiet", "--color", "0", "--jsonfile", "/out/testssl.json", "naraen:8443"]
-    volumes: ["./dast-reports:/out:rw"]
-    depends_on: [naraen]
+    command: ["--severity", "LOW", "-p", "-E", "-U", "-h", "-S", "--quiet", "--color", "0", "--jsonfile", "/tmp/testssl.json", "naraen:8443"]
 
   nuclei:
     profiles: [dast]
     image: projectdiscovery/nuclei:latest@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb
     command: ["-u", "https://naraen:8443", "-severity", "low,medium,high,critical", "-tags", "tls,misconfig,exposure,cve", "-silent", "-nc", "-fr", "-eid", "self-signed-ssl"]
-    depends_on: [naraen]
 
   ssh-audit:
     profiles: [dast]
     image: positronsecurity/ssh-audit:latest@sha256:6d5dee75fe91b5f6279f683f0e7d4374d2ba83e2227c8d9a17097aac2775127d
     # Policy mode: fails unless the server offers exactly the audited algorithm set.
     command: ["-P", "/policy/naraen.policy", "naraen:2222"]
-    volumes: ["./.ssh-audit:/policy:ro"]
-    depends_on: [naraen]
 
   # ---- Dependency scan (profile "scan"), run by the security workflow ----
   # Kept here rather than in the workflow so Dependabot updates its pin.

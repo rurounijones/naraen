@@ -23,9 +23,13 @@ paths:
     post:
       summary: LFS Batch API
       security: [{bearer: []}]
+      # The examples, and upload listed first, make the request a scanner
+      # generates from this spec valid for the development stack's repository,
+      # so a scan with a dev upload token (scripts/dast.sh) passes
+      # authentication.
       parameters:
-        - {name: owner, in: path, required: true, schema: {type: string, maxLength: 100}}
-        - {name: repo, in: path, required: true, schema: {type: string, maxLength: 100}}
+        - {name: owner, in: path, required: true, example: example, schema: {type: string, maxLength: 100}}
+        - {name: repo, in: path, required: true, example: repo, schema: {type: string, maxLength: 100}}
       requestBody:
         required: true
         content:
@@ -34,8 +38,8 @@ paths:
               type: object
               required: [operation, objects]
               properties:
-                operation: {type: string, enum: [download, upload]}
-                transfers: {type: array, items: {type: string}, description: "Must include basic when present"}
+                operation: {type: string, enum: [upload, download]}
+                transfers: {type: array, items: {type: string, example: basic}, description: "Must include basic when present"}
                 hash_algo: {type: string, enum: [sha256]}
                 objects:
                   type: array
@@ -44,8 +48,8 @@ paths:
                     type: object
                     required: [oid, size]
                     properties:
-                      oid: {type: string, pattern: "^[0-9a-f]{64}$"}
-                      size: {type: integer, minimum: 0, maximum: 5368709120}
+                      oid: {type: string, pattern: "^[0-9a-f]{64}$", example: "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393"}
+                      size: {type: integer, minimum: 0, maximum: 5368709120, example: 12345}
       responses:
         "200":
           description: One entry per distinct object, in request order

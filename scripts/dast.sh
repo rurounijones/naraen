@@ -56,16 +56,33 @@ run() {
 # report <service> <path>: copies a report out of the tool's container.
 report() { docker cp -q "$("${dast[@]}" ps -aq "$1"):$2" dast-reports/; }
 
-# HTTPS: ZAP API scan from the OpenAPI spec, then a baseline scan.
+# HTTPS: ZAP API scan from the OpenAPI spec, authenticated, then a baseline
+# scan. The token is the writer's for example/repo, minted over SSH from the
+# client like any developer's; .zap/auth_hook.py makes ZAP send it on every
+# request. It reaches the ZAP container's environment, never a file in
+# dast-reports, which CI uploads.
+token="$("${compose[@]}" exec -T client ssh naraen git-lfs-authenticate example/repo upload | jq -r .header.Authorization)"
+case "$token" in Bearer\ ?*) ;; *) echo "no token from git-lfs-authenticate" >&2; exit 1 ;; esac
+export NARAEN_DAST_TOKEN="$token"
 # ZAP requires /zap/wrk, which its image lacks, and writes its reports there.
 mkdir -p "$stage/zap-api/wrk" "$stage/zap-baseline/wrk" "$stage/ssh-audit/policy"
-cp api/openapi.yaml .zap/rules.tsv "$stage/zap-api/wrk/"
+cp api/openapi.yaml .zap/rules.tsv .zap/auth_hook.py "$stage/zap-api/wrk/"
 cp .zap/rules.tsv "$stage/zap-baseline/wrk/"
 cp .ssh-audit/naraen.policy "$stage/ssh-audit/policy/"
+since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 rc=0
 run zap-api "$stage/zap-api/wrk" /zap 1000 || rc=$?
 report zap-api /zap/wrk/zap-api.html
 [ "$rc" -eq 0 ] || exit "$rc"
+# The scan must have got past authentication: a token ZAP failed to send, or
+# one the server refused, would leave every request at a 401 and the scan
+# passing for the wrong reason.
+issued="$("${compose[@]}" logs --no-log-prefix --since "$since" naraen | grep -c '"msg":"links issued".*"identity":"writer"' || true)"
+if [ "$issued" -eq 0 ]; then
+  echo "the authenticated ZAP scan never passed authentication" >&2
+  exit 1
+fi
+echo "authenticated ZAP scan: $issued Batch requests passed authentication"
 
 rc=0
 run zap-baseline "$stage/zap-baseline/wrk" /zap 1000 || rc=$?

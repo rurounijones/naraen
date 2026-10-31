@@ -10,7 +10,7 @@ import (
 
 // TestS3Reachable checks the compose-provided object store is up.
 func TestS3Reachable(t *testing.T) {
-	c, err := net.DialTimeout("tcp", "127.0.0.1:8333", 3*time.Second)
+	c, err := net.DialTimeout("tcp", s3Target, 3*time.Second)
 	if err != nil {
 		t.Skipf("local S3 not running: %v", err)
 	}

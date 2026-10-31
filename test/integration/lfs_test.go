@@ -4,6 +4,7 @@ package integration
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -32,17 +34,61 @@ import (
 	"github.com/rurounijones/naraen/internal/storage"
 )
 
-// The S3 service from docker-compose.yml, and the public development
-// credentials of test/testdata/seaweedfs/s3.json. The admin identity creates
-// buckets and checks what they hold; the server signs with the signer
-// identity, which may only read and write objects.
+// The public development credentials of test/testdata/seaweedfs/s3.json.
+// The admin identity creates buckets and checks what they hold; the server
+// signs with the signer identity, which may only read and write objects.
 const (
-	s3Endpoint     = "http://127.0.0.1:8333"
 	s3AdminKey     = "naraen-dev-admin"
 	s3AdminSecret  = "naraen-dev-admin-secret-not-for-production" // #nosec G101 -- public dev credential
 	s3SignerKey    = "naraen-dev-signer"
 	s3SignerSecret = "naraen-dev-signer-secret-not-for-production" // #nosec G101 -- public dev credential
 )
+
+// s3Target is the S3 service from docker-compose.yml: published on this
+// host's loopback by default (CI), or another container's address, such as
+// s3:8333 in the devcontainer, from NARAEN_TEST_S3_ADDR.
+var s3Target = cmp.Or(os.Getenv("NARAEN_TEST_S3_ADDR"), "127.0.0.1:8333")
+
+// s3Endpoint is where the tests, the server and git-lfs reach S3: a relay on
+// loopback to s3Target, started by TestMain. The server under test runs in
+// production mode, which allows plain http only to loopback, so the relay
+// keeps that configuration wherever S3 runs. Links sign the relay's address,
+// and S3 checks them against the Host header the relay passes through.
+var s3Endpoint string
+
+func TestMain(m *testing.M) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "s3 relay:", err)
+		os.Exit(1)
+	}
+	go relay(ln, s3Target)
+	s3Endpoint = "http://" + ln.Addr().String()
+	os.Exit(m.Run())
+}
+
+// relay copies each connection accepted on ln to a new one to target, both
+// ways, until either side closes.
+func relay(ln net.Listener, target string) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			defer c.Close()
+			u, err := net.DialTimeout("tcp", target, 5*time.Second)
+			if err != nil {
+				return
+			}
+			defer u.Close()
+			done := make(chan struct{}, 2)
+			go func() { _, _ = io.Copy(u, c); done <- struct{}{} }()
+			go func() { _, _ = io.Copy(c, u); done <- struct{}{} }()
+			<-done
+		}()
+	}
+}
 
 func s3Admin() *s3.Client {
 	cfg := aws.Config{Region: "us-east-1", Credentials: credentials.NewStaticCredentialsProvider(s3AdminKey, s3AdminSecret, "")}
@@ -56,8 +102,8 @@ func s3Admin() *s3.Client {
 // see each other's objects.
 func newBucket(t *testing.T) string {
 	t.Helper()
-	if c, err := net.DialTimeout("tcp", "127.0.0.1:8333", time.Second); err != nil {
-		t.Fatalf("S3 is not reachable at %s (start it with `docker compose up -d s3`): %v", s3Endpoint, err)
+	if c, err := net.DialTimeout("tcp", s3Target, time.Second); err != nil {
+		t.Fatalf("S3 is not reachable at %s (start it with `docker compose up -d s3`): %v", s3Target, err)
 	} else {
 		_ = c.Close()
 	}

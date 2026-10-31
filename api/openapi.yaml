@@ -81,9 +81,11 @@ paths:
         the repo the token's repo claim names, which must be the repo in the
         URL. The body has the shape git-lfs-authenticate prints.
       security: [{bearer: []}]
+      # The examples name the development stack's repository, which the dev
+      # OIDC issuer's tokens can name (scripts/dast.sh).
       parameters:
-        - {name: owner, in: path, required: true, schema: {type: string, maxLength: 100}}
-        - {name: repo, in: path, required: true, schema: {type: string, maxLength: 100}}
+        - {name: owner, in: path, required: true, example: example, schema: {type: string, maxLength: 100}}
+        - {name: repo, in: path, required: true, example: repo, schema: {type: string, maxLength: 100}}
       responses:
         "200":
           description: A read-only LFS token

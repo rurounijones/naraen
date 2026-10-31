@@ -152,10 +152,12 @@ services:
     profiles: [dast]
     image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
     # Authenticated: dast.sh sets NARAEN_DAST_TOKEN to a writer token for
-    # example/repo, and .zap/auth_hook.py makes ZAP send it on every request,
-    # so the scan reaches the Batch API's storage checks and link signing.
-    # Listed without a value, it is passed only when set.
-    environment: [NARAEN_DAST_TOKEN]
+    # example/repo and NARAEN_DAST_OIDC_TOKEN to a dev OIDC token for it, and
+    # .zap/auth_hook.py makes ZAP send each to the endpoint that takes it, so
+    # the scan reaches the Batch API's storage checks and link signing and
+    # the exchange's minting. Listed without values, they are passed only
+    # when set.
+    environment: [NARAEN_DAST_TOKEN, NARAEN_DAST_OIDC_TOKEN]
     command: >
       zap-api-scan.py -t /zap/wrk/openapi.yaml -f openapi
       -O https://naraen:8443 -c /zap/wrk/rules.tsv -r zap-api.html -I

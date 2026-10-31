@@ -18,10 +18,13 @@ import (
 )
 
 // scripted returns the next result on each FullSync and cancels the run
-// once it has none left.
+// once it has none left. Run may still start a sync after that, when its
+// ticker and the cancellation are ready together and select picks the
+// ticker; such a sync gets then.
 type scripted struct {
 	mu      sync.Mutex
 	results []func() (*datastore.Snapshot, error)
+	then    func() (*datastore.Snapshot, error)
 	cancel  context.CancelFunc
 }
 
@@ -30,6 +33,9 @@ func (s *scripted) Name() string { return "scripted" }
 func (s *scripted) FullSync(context.Context) (*datastore.Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.results) == 0 {
+		return s.then()
+	}
 	next := s.results[0]
 	s.results = s.results[1:]
 	if len(s.results) == 0 {
@@ -58,8 +64,9 @@ func TestRun(t *testing.T) {
 	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
 	good := snapshot(t, 1)
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &scripted{cancel: cancel, results: []func() (*datastore.Snapshot, error){
-		func() (*datastore.Snapshot, error) { return good, nil },
+	keep := func() (*datastore.Snapshot, error) { return good, nil }
+	p := &scripted{cancel: cancel, then: keep, results: []func() (*datastore.Snapshot, error){
+		keep,
 		func() (*datastore.Snapshot, error) { return nil, errors.New("github down") },
 		// Swap rejects an empty snapshot.
 		func() (*datastore.Snapshot, error) { return snapshot(t, 0), nil },

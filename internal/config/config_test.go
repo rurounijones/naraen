@@ -372,6 +372,20 @@ func TestS3Endpoint(t *testing.T) {
 	if _, err := Load(env(e), keyFile); err == nil || !strings.Contains(err.Error(), "NARAEN_S3_ENDPOINT") {
 		t.Errorf("cleartext endpoint over the network: %v", err)
 	}
+	// Development mode may name a local stack's S3 by its container name,
+	// over http; nothing else may.
+	dev := map[string]string{"NARAEN_DEV": "true", "NARAEN_S3_ENDPOINT": "http://s3:8333"}
+	if c, err := Load(env(dev), keyFile); err != nil || c.S3Endpoint != "http://s3:8333" {
+		t.Errorf("dev endpoint = %q, %v", c.S3Endpoint, err)
+	}
+	dev["NARAEN_S3_ENDPOINT"] = "ftp://s3:8333"
+	if _, err := Load(env(dev), keyFile); err == nil {
+		t.Error("dev mode accepted a non-http endpoint")
+	}
+	dev = map[string]string{"NARAEN_DEV": "true", "NARAEN_OTLP_ENDPOINT": "http://collector:4318"}
+	if _, err := Load(env(dev), keyFile); err == nil || !strings.Contains(err.Error(), "NARAEN_OTLP_ENDPOINT") {
+		t.Errorf("dev mode relaxed the OTLP endpoint: %v", err)
+	}
 	if c, err := Load(env(prod()), keyFile); err != nil || c.S3Endpoint != "" {
 		t.Errorf("default = %q, %v", c.S3Endpoint, err)
 	}

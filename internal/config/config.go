@@ -152,7 +152,7 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 		}
 		c.SSHConnInterval = d
 	}
-	if c.OTLPEndpoint, err = endpoint("NARAEN_OTLP_ENDPOINT", getenv("NARAEN_OTLP_ENDPOINT")); err != nil {
+	if c.OTLPEndpoint, err = endpoint("NARAEN_OTLP_ENDPOINT", getenv("NARAEN_OTLP_ENDPOINT"), false); err != nil {
 		return Config{}, err
 	}
 	if path := getenv("NARAEN_OTLP_HEADERS_FILE"); path != "" {
@@ -164,7 +164,7 @@ func Load(getenv Getenv, readFile ReadFile) (Config, error) {
 			return Config{}, err
 		}
 	}
-	if c.S3Endpoint, err = endpoint("NARAEN_S3_ENDPOINT", getenv("NARAEN_S3_ENDPOINT")); err != nil {
+	if c.S3Endpoint, err = endpoint("NARAEN_S3_ENDPOINT", getenv("NARAEN_S3_ENDPOINT"), c.Dev); err != nil {
 		return Config{}, err
 	}
 	if c.Bucket = getenv("NARAEN_S3_BUCKET"); c.Bucket != "" && !bucketName(c.Bucket) {
@@ -220,11 +220,11 @@ func loadGitHub(getenv Getenv, readFile ReadFile) (*GitHub, error) {
 		return nil, fmt.Errorf("config: github app key: %w", err)
 	}
 	g.AppKey = raw
-	if g.APIURL, err = endpoint("NARAEN_GITHUB_API_URL", or(getenv("NARAEN_GITHUB_API_URL"), "https://api.github.com")); err != nil {
+	if g.APIURL, err = endpoint("NARAEN_GITHUB_API_URL", or(getenv("NARAEN_GITHUB_API_URL"), "https://api.github.com"), false); err != nil {
 		return nil, err
 	}
 	jwks := or(getenv("NARAEN_GITHUB_JWKS_URL"), "https://token.actions.githubusercontent.com/.well-known/jwks")
-	if g.JWKSURL, err = endpoint("NARAEN_GITHUB_JWKS_URL", jwks); err != nil {
+	if g.JWKSURL, err = endpoint("NARAEN_GITHUB_JWKS_URL", jwks, false); err != nil {
 		return nil, err
 	}
 	if v := getenv("NARAEN_SYNC_INTERVAL"); v != "" {
@@ -261,15 +261,18 @@ func bucketName(s string) bool {
 // credential, S3 request signatures) and names users and repos, so it goes
 // over https, except to a loopback address, where a local collector, a
 // development S3 or a test receiver listens and nothing crosses the network.
+// anyHTTP also allows http to any host; only development mode's S3 sets it,
+// because a local stack reaches its S3 by a container name (compose's s3)
+// that every client container resolves, and its credentials are public.
 // Empty means the default: no export, or AWS.
-func endpoint(name, v string) (string, error) {
+func endpoint(name, v string, anyHTTP bool) (string, error) {
 	if v == "" {
 		return "", nil
 	}
 	u, err := url.Parse(v)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" ||
-		(u.Scheme != "https" && (u.Scheme != "http" || !loopback(u.Hostname()))) {
-		return "", fmt.Errorf("config: %s must be an https URL, or http to a loopback address: %q", name, v)
+		(u.Scheme != "https" && (u.Scheme != "http" || (!anyHTTP && !loopback(u.Hostname())))) {
+		return "", fmt.Errorf("config: %s must be an https URL, or http to a loopback address (to any address for S3 when NARAEN_DEV=true): %q", name, v)
 	}
 	return strings.TrimSuffix(v, "/"), nil
 }

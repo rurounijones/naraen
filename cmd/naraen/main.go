@@ -22,7 +22,9 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -86,7 +88,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	log = slog.New(tel.LogHandler(local.Handler()))
 	rec := telemetry.NewRecorder(tel.Meter)
 	if cfg.OTLPEndpoint == "" {
-		log.WarnContext(ctx, "metrics and logs are not exported: NARAEN_OTLP_ENDPOINT is not set")
+		log.WarnContext(ctx, "metrics, traces and logs are not exported: NARAEN_OTLP_ENDPOINT is not set")
 	}
 
 	store := datastore.NewStore(cfg.SnapshotMaxAge, datastore.DefaultLimits)
@@ -102,11 +104,11 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	// With neither a snapshot file nor a provider the server stays not-ready
 	// and refuses everything.
 	if cfg.GitHub != nil {
-		p, err := githubProvider(*cfg.GitHub, rec, log)
+		p, err := githubProvider(*cfg.GitHub, tel.Tracer, rec, log)
 		if err != nil {
 			return err
 		}
-		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, rec, log)
+		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, tel.Tracer, rec, log)
 	}
 
 	if cfg.Dev {
@@ -127,7 +129,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	authorizer := authz.New(store)
 	batchHandler := batch.Unconfigured()
 	if cfg.Bucket != "" {
-		objects, err := loadStorage(ctx, cfg.S3Endpoint, cfg.Bucket)
+		objects, err := loadStorage(ctx, cfg.S3Endpoint, cfg.Bucket, tel.Tracer)
 		if err != nil {
 			return err
 		}
@@ -146,7 +148,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	if err != nil {
 		return err
 	}
-	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batchHandler, exchange, webhook), httpapi.TLSConfig(cert))
+	httpSrv := httpapi.NewServer(cfg.HTTPSAddr, httpapi.Handler(store, batchHandler, exchange, webhook, tel.Tracer), httpapi.TLSConfig(cert))
 
 	sshLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.SSHAddr)
 	if err != nil {
@@ -158,7 +160,7 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	// Both servers report here when they stop; ErrServerClosed and a nil
 	// Serve result are the normal shutdown outcomes and are filtered below.
 	errc := make(chan error, 2)
-	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), authenticate, rec, log) }()
+	go func() { errc <- sshd.Serve(ctx, sshLn, sshCfg, sshLimits(cfg), authenticate, tel.Tracer, rec, log) }()
 	go func() { errc <- httpSrv.ListenAndServeTLS("", "") }()
 	log.InfoContext(ctx, "listening", "version", version, "ssh", cfg.SSHAddr, "https", cfg.HTTPSAddr, "public_origin", cfg.PublicURL)
 
@@ -355,7 +357,7 @@ func flushTelemetry(tel *telemetry.Providers, log *slog.Logger) {
 // AWS_SHARED_CREDENTIALS_FILE elsewhere, so no secret is read from the
 // environment. The region must be set explicitly: guessing one would sign
 // links for the wrong endpoint.
-func loadStorage(ctx context.Context, endpoint, bucket string) (*s3store.Store, error) {
+func loadStorage(ctx context.Context, endpoint, bucket string, tp trace.TracerProvider) (*s3store.Store, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("s3: %w", err)
@@ -363,17 +365,22 @@ func loadStorage(ctx context.Context, endpoint, bucket string) (*s3store.Store, 
 	if awsCfg.Region == "" {
 		return nil, errors.New("s3: AWS_REGION is not set")
 	}
-	return s3store.New(awsCfg, endpoint, bucket), nil
+	return s3store.New(awsCfg, endpoint, bucket, tp), nil
 }
 
 // githubProvider builds the GitHub provider. Its HTTP client has a timeout, so
-// a hung GitHub request fails the sync instead of stalling every later one.
-func githubProvider(g config.GitHub, rec *telemetry.Recorder, log *slog.Logger) (*github.Provider, error) {
+// a hung GitHub request fails the sync instead of stalling every later one,
+// and traces each request, the installation token's included, inside the
+// sync's span.
+func githubProvider(g config.GitHub, tp trace.TracerProvider, rec *telemetry.Recorder, log *slog.Logger) (*github.Provider, error) {
 	key, err := github.ParseAppKey(g.AppKey)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: otelhttp.NewTransport(http.DefaultTransport, telemetry.HTTPOptions(tp)...),
+	}
 	auth := &github.AppAuth{
 		BaseURL: g.APIURL, AppID: g.AppID, InstallationID: g.InstallationID,
 		Key: key, HTTP: client, Now: time.Now,

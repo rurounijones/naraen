@@ -4,17 +4,22 @@ package integration
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	collectorlogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -37,13 +42,14 @@ func (s *syncBuffer) String() string {
 }
 
 // otlpReceiver stands in for the telemetry backend: it accepts OTLP/HTTP
-// protobuf pushes of metrics and logs, as OpenObserve does, and keeps every
-// request.
+// protobuf pushes of metrics, traces and logs, as OpenObserve does, and keeps
+// every request.
 type otlpReceiver struct {
 	*httptest.Server
 	mu       sync.Mutex
 	requests []*collectormetrics.ExportMetricsServiceRequest
 	logs     []*collectorlogs.ExportLogsServiceRequest
+	traces   []*collectortrace.ExportTraceServiceRequest
 }
 
 func newOTLPReceiver(t *testing.T) *otlpReceiver {
@@ -60,6 +66,8 @@ func newOTLPReceiver(t *testing.T) *otlpReceiver {
 			msg, resp = &collectormetrics.ExportMetricsServiceRequest{}, &collectormetrics.ExportMetricsServiceResponse{}
 		case "/v1/logs":
 			msg, resp = &collectorlogs.ExportLogsServiceRequest{}, &collectorlogs.ExportLogsServiceResponse{}
+		case "/v1/traces":
+			msg, resp = &collectortrace.ExportTraceServiceRequest{}, &collectortrace.ExportTraceServiceResponse{}
 		}
 		if err != nil || msg == nil || proto.Unmarshal(body, msg) != nil {
 			http.Error(w, "bad export", http.StatusBadRequest)
@@ -71,6 +79,8 @@ func newOTLPReceiver(t *testing.T) *otlpReceiver {
 			r.requests = append(r.requests, m)
 		case *collectorlogs.ExportLogsServiceRequest:
 			r.logs = append(r.logs, m)
+		case *collectortrace.ExportTraceServiceRequest:
+			r.traces = append(r.traces, m)
 		}
 		r.mu.Unlock()
 		out, _ := proto.Marshal(resp)
@@ -82,7 +92,8 @@ func newOTLPReceiver(t *testing.T) *otlpReceiver {
 }
 
 // records returns every log record received, each as its attributes plus
-// "msg" for the body and "level" for the severity text.
+// "msg" for the body, "level" for the severity text and "trace" for the
+// trace ID in hex, "" for none.
 func (r *otlpReceiver) records() []map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -91,7 +102,10 @@ func (r *otlpReceiver) records() []map[string]string {
 		for _, rl := range req.GetResourceLogs() {
 			for _, sl := range rl.GetScopeLogs() {
 				for _, lr := range sl.GetLogRecords() {
-					rec := map[string]string{"msg": lr.GetBody().GetStringValue(), "level": lr.GetSeverityText()}
+					rec := map[string]string{
+						"msg": lr.GetBody().GetStringValue(), "level": lr.GetSeverityText(),
+						"trace": hex.EncodeToString(lr.GetTraceId()),
+					}
 					for _, kv := range lr.GetAttributes() {
 						rec[kv.GetKey()] = kv.GetValue().GetStringValue()
 					}
@@ -101,6 +115,57 @@ func (r *otlpReceiver) records() []map[string]string {
 		}
 	}
 	return got
+}
+
+// span is one received span, with IDs in hex and attribute values as text.
+type span struct {
+	name, trace, id, parent string
+	attrs                   map[string]string
+	failed                  bool
+}
+
+// spans returns every span received.
+func (r *otlpReceiver) spans() []span {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var got []span
+	for _, req := range r.traces {
+		for _, rs := range req.GetResourceSpans() {
+			for _, ss := range rs.GetScopeSpans() {
+				for _, s := range ss.GetSpans() {
+					sp := span{
+						name: s.GetName(), trace: hex.EncodeToString(s.GetTraceId()), id: hex.EncodeToString(s.GetSpanId()),
+						parent: hex.EncodeToString(s.GetParentSpanId()), attrs: map[string]string{},
+						failed: s.GetStatus().GetCode() == tracepb.Status_STATUS_CODE_ERROR,
+					}
+					for _, kv := range s.GetAttributes() {
+						v := kv.GetValue()
+						sp.attrs[kv.GetKey()] = v.GetStringValue()
+						if _, ok := v.GetValue().(*commonpb.AnyValue_IntValue); ok {
+							sp.attrs[kv.GetKey()] = strconv.FormatInt(v.GetIntValue(), 10)
+						}
+					}
+					got = append(got, sp)
+				}
+			}
+		}
+	}
+	return got
+}
+
+// find returns the spans named name that hold each of want's attributes.
+func find(spans []span, name string, want map[string]string) []span {
+	var out []span
+	for _, s := range spans {
+		match := s.name == name
+		for k, v := range want {
+			match = match && s.attrs[k] == v
+		}
+		if match {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // counters returns the latest value of every int64 sum data point received,

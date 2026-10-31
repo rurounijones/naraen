@@ -11,6 +11,11 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 type fakeReady bool
@@ -29,7 +34,7 @@ var created = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.
 // Without a webhook handler the route does not exist.
 func TestWebhookUnmounted(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler(fakeReady(true), teapot, accepted, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/webhooks/github", nil))
+	Handler(fakeReady(true), teapot, accepted, nil, tracenoop.NewTracerProvider()).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/webhooks/github", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
@@ -58,7 +63,7 @@ func TestEndpoints(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			Handler(fakeReady(tt.ready), teapot, accepted, created).ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
+			Handler(fakeReady(tt.ready), teapot, accepted, created, tracenoop.NewTracerProvider()).ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
 			if rec.Code != tt.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
@@ -68,6 +73,43 @@ func TestEndpoints(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Each request but the health probes gets one span, named by its route and
+// started as a new trace whatever trace context the client sent. The client
+// address is the peer's, not one the client claims in X-Forwarded-For.
+func TestSpans(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	h := Handler(fakeReady(true), teapot, accepted, created, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
+	for _, path := range []string{"/healthz", "/readyz"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	if n := len(sr.Ended()); n != 0 {
+		t.Fatalf("probes made %d spans", n)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/acme/assets/objects/batch", nil)
+	req.RemoteAddr = "192.0.2.7:4242"
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+	req.Header.Set("Traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	s := spans[0]
+	if s.Name() != "POST /{owner}/{repo}/objects/batch" {
+		t.Errorf("name = %q", s.Name())
+	}
+	if s.Parent().IsValid() || s.SpanContext().TraceID().String() == "4bf92f3577b34da6a3ce929d0e0e4736" || len(s.Links()) != 0 {
+		t.Errorf("span joined the client's trace: parent %v, trace %v, links %v", s.Parent(), s.SpanContext().TraceID(), s.Links())
+	}
+	attrs := attribute.NewSet(s.Attributes()...)
+	if v, _ := attrs.Value("client.address"); v.AsString() != "192.0.2.7" {
+		t.Errorf("client.address = %q", v.AsString())
+	}
+	if v, _ := attrs.Value("http.response.status_code"); v.AsInt64() != http.StatusTeapot {
+		t.Errorf("status = %d", v.AsInt64())
 	}
 }
 
@@ -83,7 +125,7 @@ func TestTLS13Only(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewUnstartedServer(Handler(fakeReady(true), teapot, accepted, created))
+	srv := httptest.NewUnstartedServer(Handler(fakeReady(true), teapot, accepted, created, tracenoop.NewTracerProvider()))
 	srv.TLS = TLSConfig(cert)
 	srv.StartTLS()
 	defer srv.Close()

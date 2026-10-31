@@ -29,6 +29,9 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric/noop"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -300,7 +303,7 @@ func TestRunServesWithConfiguredKeyMaterial(t *testing.T) {
 func TestRunWithoutExport(t *testing.T) {
 	e := prodEnv(t)
 	delete(e, "NARAEN_OTLP_ENDPOINT")
-	if logs := serveUntilCancelled(t, e, rand.Reader); !strings.Contains(logs, "metrics and logs are not exported") {
+	if logs := serveUntilCancelled(t, e, rand.Reader); !strings.Contains(logs, "metrics, traces and logs are not exported") {
 		t.Errorf("missing export not reported: %s", logs)
 	}
 }
@@ -631,16 +634,16 @@ func TestSSHLimits(t *testing.T) {
 
 func TestLoadStorage(t *testing.T) {
 	isolateAWS(t)
-	if s, err := loadStorage(context.Background(), "http://127.0.0.1:8333", "acme-lfs"); err != nil || s == nil {
+	if s, err := loadStorage(context.Background(), "http://127.0.0.1:8333", "acme-lfs", tracenoop.NewTracerProvider()); err != nil || s == nil {
 		t.Fatalf("storage: %v, %v", s, err)
 	}
 	t.Setenv("AWS_REGION", "")
-	if _, err := loadStorage(context.Background(), "", "acme-lfs"); err == nil || !strings.Contains(err.Error(), "AWS_REGION") {
+	if _, err := loadStorage(context.Background(), "", "acme-lfs", tracenoop.NewTracerProvider()); err == nil || !strings.Contains(err.Error(), "AWS_REGION") {
 		t.Errorf("no region: %v", err)
 	}
 	// A setting the SDK cannot parse stops startup.
 	t.Setenv("AWS_MAX_ATTEMPTS", "many")
-	if _, err := loadStorage(context.Background(), "", "acme-lfs"); err == nil {
+	if _, err := loadStorage(context.Background(), "", "acme-lfs", tracenoop.NewTracerProvider()); err == nil {
 		t.Error("unparseable AWS setting accepted")
 	}
 }
@@ -670,13 +673,39 @@ func TestGitHubProvider(t *testing.T) {
 	}
 	rec := telemetry.NewRecorder(noop.NewMeterProvider())
 	log := slog.New(slog.DiscardHandler)
-	p, err := githubProvider(g, rec, log)
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	p, err := githubProvider(g, tp, rec, log)
 	if err != nil || p.Org != "acme" || p.Audience != "aud" || p.JWKSURL != "https://keys" || p.Client.BaseURL != g.APIURL || p.Client.Rec != rec {
 		t.Fatalf("provider = %+v, %v", p, err)
 	}
 	g.AppKey = []byte("not a key")
-	if _, err := githubProvider(g, rec, log); err == nil {
+	if _, err := githubProvider(g, tp, rec, log); err == nil {
 		t.Error("bad app key accepted")
+	}
+
+	// Each request is a span inside the sync's, and no trace context goes
+	// to GitHub.
+	var sent http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { sent = r.Header.Clone() }))
+	defer srv.Close()
+	ctx, sync := tp.Tracer("test").Start(context.Background(), "provider full sync")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.Client.HTTP.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	sync.End()
+	if sent.Get("Traceparent") != "" {
+		t.Errorf("trace context sent: %v", sent)
+	}
+	spans := sr.Ended()
+	if len(spans) != 2 || spans[0].Name() != "HTTP GET" || spans[0].Parent().SpanID() != sync.SpanContext().SpanID() {
+		t.Errorf("spans = %v", spans)
 	}
 }
 

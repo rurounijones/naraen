@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/batch"
@@ -84,7 +85,7 @@ func batchServer(t *testing.T) *batchTarget {
 		Log:     slog.New(slog.DiscardHandler),
 		Rand:    strings.NewReader(strings.Repeat("x", 1<<12)),
 	}
-	return &batchTarget{srv: httpapi.Handler(st, h, http.NotFoundHandler(), nil), tokens: tokens, clock: &now, objects: objects}
+	return &batchTarget{srv: httpapi.Handler(st, h, http.NotFoundHandler(), nil, tracenoop.NewTracerProvider()), tokens: tokens, clock: &now, objects: objects}
 }
 
 func (b *batchTarget) post(path, tok, body string) int {

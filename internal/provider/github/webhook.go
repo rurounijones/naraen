@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"strconv"
 
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/datastore"
+	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/webhook"
 )
 
@@ -97,22 +99,26 @@ type WebhookHandler struct {
 
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	log := h.Log.With("remote", r.RemoteAddr, "event", r.Header.Get("X-GitHub-Event"),
-		"delivery", r.Header.Get("X-GitHub-Delivery"))
+	event, deliveryID := r.Header.Get("X-GitHub-Event"), r.Header.Get("X-GitHub-Delivery")
+	log := h.Log.With("remote", r.RemoteAddr, "event", event, "delivery", deliveryID)
+	telemetry.Annotate(ctx, attribute.String(telemetry.AttrEvent, event), attribute.String(telemetry.AttrDelivery, deliveryID))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxDelivery))
 	if err != nil {
 		log.InfoContext(ctx, "webhook refused", "reason", "too_large")
+		telemetry.Annotate(ctx, attribute.String(telemetry.AttrReason, "too_large"))
 		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	if err := webhook.Verify(h.Secret, body, r.Header.Get("X-Hub-Signature-256")); err != nil {
 		log.InfoContext(ctx, "webhook refused", "reason", "bad_signature")
+		telemetry.Annotate(ctx, attribute.String(telemetry.AttrReason, "bad_signature"))
 		http.Error(w, "bad signature", http.StatusUnauthorized)
 		return
 	}
-	n, err := Narrowing(r.Header.Get("X-GitHub-Event"), body)
+	n, err := Narrowing(event, body)
 	if err != nil {
 		log.WarnContext(ctx, "webhook refused", "reason", "malformed")
+		telemetry.Annotate(ctx, attribute.String(telemetry.AttrReason, "malformed"))
 		http.Error(w, "malformed payload", http.StatusBadRequest)
 		return
 	}

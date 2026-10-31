@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/rurounijones/naraen/internal/telemetry"
 )
@@ -107,6 +108,31 @@ func counts(t *testing.T, r *sdkmetric.ManualReader, name string) map[string]int
 		}
 	}
 	return got
+}
+
+// span waits for an ended span named name that holds each of want's string
+// attributes. Spans end after the client has its answer, so they may arrive
+// a little later.
+func (o *observed) span(t *testing.T, name string, want map[string]string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, s := range o.spans.Ended() {
+			attrs := attribute.NewSet(s.Attributes()...)
+			match := s.Name() == name
+			for k, v := range want {
+				got, _ := attrs.Value(attribute.Key(k))
+				match = match && got.String() == v
+			}
+			if match {
+				return s
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q span with %v in %d ended spans", name, want, len(o.spans.Ended()))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // waitCount waits until metric name's point for attrs reaches want.

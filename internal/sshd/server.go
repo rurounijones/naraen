@@ -12,6 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -151,8 +154,12 @@ type Handler interface {
 }
 
 // Serve accepts connections on ln until ctx is cancelled. It returns an error
-// only if the listener is closed out from under it.
-func Serve(ctx context.Context, ln net.Listener, cfg *ssh.ServerConfig, lim Limits, h Handler, rec *telemetry.Recorder, log *slog.Logger) error {
+// only if the listener is closed out from under it. Every connection that
+// reaches the handshake gets a span from tp, with a child span for each
+// command; connections closed by a limit before it get none, since a flood
+// would otherwise flood the traces, and the metric counts them.
+func Serve(ctx context.Context, ln net.Listener, cfg *ssh.ServerConfig, lim Limits, h Handler, tp trace.TracerProvider, rec *telemetry.Recorder, log *slog.Logger) error {
+	tracer := telemetry.Tracer(tp)
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -196,7 +203,7 @@ func Serve(ctx context.Context, ln net.Listener, cfg *ssh.ServerConfig, lim Limi
 		}
 		go func() {
 			defer conns.release(src)
-			serveConn(ctx, conn, cfg, lim, h, rec, log)
+			serveConn(ctx, conn, cfg, lim, h, tracer, rec, log)
 		}()
 	}
 }
@@ -312,19 +319,30 @@ func (l *connLimiter) release(src string) {
 	}
 }
 
-func serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, lim Limits, h Handler, rec *telemetry.Recorder, log *slog.Logger) {
+// reasonHandshake marks the span of a connection whose handshake failed for
+// any reason other than a refused key, such as a scanner hanging up during
+// key exchange. It is a span attribute only; such failures are not counted.
+const reasonHandshake = "handshake_failed"
+
+func serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, lim Limits, h Handler, tracer trace.Tracer, rec *telemetry.Recorder, log *slog.Logger) {
 	defer nc.Close()
 	_ = nc.SetDeadline(time.Now().Add(handshakeTimeout))
 	remote := nc.RemoteAddr().String()
+	ctx, span := tracer.Start(ctx, "ssh connection",
+		trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(peerAttrs(nc.RemoteAddr())...))
+	defer span.End()
 	conn, chans, reqs, err := ssh.NewServerConn(nc, cfg)
 	if err != nil {
 		if refused, ok := refusedKey(err); ok {
 			log.InfoContext(ctx, "ssh authentication failed", "remote", remote,
 				"fingerprint", refused.fingerprint, "reason", string(refused.reason))
+			span.SetAttributes(attribute.String(telemetry.AttrFingerprint, refused.fingerprint),
+				attribute.String(telemetry.AttrReason, string(refused.reason)))
 			rec.AuthFailure(ctx, string(refused.reason), telemetry.IdentityTypeUnknown)
 			return
 		}
 		log.DebugContext(ctx, "ssh handshake failed", "remote", remote)
+		span.SetAttributes(attribute.String(telemetry.AttrReason, reasonHandshake))
 		return
 	}
 	// The deadline bounds the whole connection, so an authenticated client
@@ -342,10 +360,25 @@ func serveConn(ctx context.Context, nc net.Conn, cfg *ssh.ServerConfig, lim Limi
 			"fingerprint", ext[extFingerprint], "remote", remote),
 	}
 	s.Log.InfoContext(ctx, "ssh authenticated")
+	span.SetAttributes(attribute.String(telemetry.AttrIdentity, s.IdentityID),
+		attribute.String(telemetry.AttrIdentityType, s.IdentityKind),
+		attribute.String(telemetry.AttrFingerprint, ext[extFingerprint]))
 
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	serveChannels(ctx, chans, lim.MaxSessions, s, h, rec)
+}
+
+// peerAttrs describes the client's address as the semantic conventions do. Only
+// a TCP address is split into address and port; anything else is kept whole.
+func peerAttrs(a net.Addr) []attribute.KeyValue {
+	if tcp, ok := a.(*net.TCPAddr); ok {
+		return []attribute.KeyValue{
+			attribute.String("network.peer.address", tcp.IP.String()),
+			attribute.Int("network.peer.port", tcp.Port),
+		}
+	}
+	return []attribute.KeyValue{attribute.String("network.peer.address", a.String())}
 }
 
 // serveChannels handles up to maxSessions session channels and rejects every
@@ -375,8 +408,13 @@ func serveChannels(ctx context.Context, chans <-chan ssh.NewChannel, maxSessions
 // the path, so the count is worth watching.
 const reasonBadCommand = "bad_command"
 
-// serveSession runs one exec request. Whatever goes wrong, the client hears
-// only "request refused"; the reason goes to the log and the metrics.
+// reasonUnsupported marks the span of a git-lfs-transfer attempt. Like
+// reasonHandshake it is a span attribute only: git-lfs makes the attempt
+// before every authenticate, so it is not a refusal worth counting.
+const reasonUnsupported = "unsupported"
+
+// serveSession runs the session's one exec request and refuses every other
+// request type.
 func serveSession(ctx context.Context, ch ssh.Channel, reqs <-chan *ssh.Request, s Session, h Handler, rec *telemetry.Recorder) {
 	defer ch.Close()
 	for req := range reqs {
@@ -384,42 +422,58 @@ func serveSession(ctx context.Context, ch ssh.Channel, reqs <-chan *ssh.Request,
 			_ = req.Reply(false, nil)
 			continue
 		}
-		raw, ok := parseExecPayload(req.Payload)
-		cmd, err := ParseCommand(raw)
-		if !ok || err != nil {
-			// The raw command is client input of any size and content, so
-			// it is not logged.
-			s.Log.InfoContext(ctx, "command refused", "reason", reasonBadCommand)
-			rec.AuthFailure(ctx, reasonBadCommand, s.IdentityKind)
-			_ = req.Reply(false, nil)
-			exit(ch, 1)
-			return
-		}
-		_ = req.Reply(true, nil)
-		out, err := h.Handle(ctx, s, cmd)
-		if errors.Is(err, ErrUnsupported) {
-			s.Log.InfoContext(ctx, "command unsupported", "command", cmd.Name, "repo", cmd.Repo, "operation", string(cmd.Op))
-			_, _ = io.WriteString(ch.Stderr(), "error: "+ErrUnsupported.Error()+"\n")
-			exit(ch, 1)
-			return
-		}
-		if err != nil {
-			if reason := authz.ReasonOf(err); reason != "" {
-				s.Log.InfoContext(ctx, "command refused", "command", cmd.Name, "repo", cmd.Repo,
-					"operation", string(cmd.Op), "reason", string(reason))
-				rec.AuthFailure(ctx, string(reason), s.IdentityKind)
-			} else {
-				s.Log.ErrorContext(ctx, "command failed", "command", cmd.Name, "repo", cmd.Repo,
-					"operation", string(cmd.Op), "error", err)
-			}
-			_, _ = io.WriteString(ch.Stderr(), "error: request refused\n")
-			exit(ch, 1)
-			return
-		}
-		_, _ = ch.Write(out)
-		exit(ch, 0)
+		serveExec(ctx, ch, req, s, h, rec)
 		return
 	}
+}
+
+// serveExec runs one exec request in a span of its own. Whatever goes wrong,
+// the client hears only "request refused"; the reason goes to the log, the
+// metrics and the span.
+func serveExec(ctx context.Context, ch ssh.Channel, req *ssh.Request, s Session, h Handler, rec *telemetry.Recorder) {
+	ctx, span := telemetry.Start(ctx, "ssh exec")
+	defer span.End()
+	raw, ok := parseExecPayload(req.Payload)
+	cmd, err := ParseCommand(raw)
+	if !ok || err != nil {
+		// The raw command is client input of any size and content, so it is
+		// not logged.
+		s.Log.InfoContext(ctx, "command refused", "reason", reasonBadCommand)
+		span.SetAttributes(attribute.String(telemetry.AttrReason, reasonBadCommand))
+		rec.AuthFailure(ctx, reasonBadCommand, s.IdentityKind)
+		_ = req.Reply(false, nil)
+		exit(ch, 1)
+		return
+	}
+	span.SetAttributes(attribute.String(telemetry.AttrCommand, cmd.Name),
+		attribute.String(telemetry.AttrRepo, cmd.Repo), attribute.String(telemetry.AttrOperation, string(cmd.Op)))
+	_ = req.Reply(true, nil)
+	out, err := h.Handle(ctx, s, cmd)
+	if errors.Is(err, ErrUnsupported) {
+		s.Log.InfoContext(ctx, "command unsupported", "command", cmd.Name, "repo", cmd.Repo, "operation", string(cmd.Op))
+		span.SetAttributes(attribute.String(telemetry.AttrReason, reasonUnsupported))
+		_, _ = io.WriteString(ch.Stderr(), "error: "+ErrUnsupported.Error()+"\n")
+		exit(ch, 1)
+		return
+	}
+	if err != nil {
+		if reason := authz.ReasonOf(err); reason != "" {
+			s.Log.InfoContext(ctx, "command refused", "command", cmd.Name, "repo", cmd.Repo,
+				"operation", string(cmd.Op), "reason", string(reason))
+			span.SetAttributes(attribute.String(telemetry.AttrReason, string(reason)))
+			rec.AuthFailure(ctx, string(reason), s.IdentityKind)
+		} else {
+			s.Log.ErrorContext(ctx, "command failed", "command", cmd.Name, "repo", cmd.Repo,
+				"operation", string(cmd.Op), "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "command failed")
+		}
+		_, _ = io.WriteString(ch.Stderr(), "error: request refused\n")
+		exit(ch, 1)
+		return
+	}
+	_, _ = ch.Write(out)
+	exit(ch, 0)
 }
 
 // parseExecPayload decodes the SSH "exec" request payload: a uint32 length

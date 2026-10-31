@@ -15,6 +15,8 @@ import (
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
@@ -37,6 +39,8 @@ type exchangeFixture struct {
 	mux     *http.ServeMux
 	logs    *bytes.Buffer
 	metrics *sdkmetric.ManualReader
+	// span holds the string attributes of the last request's span.
+	span map[string]string
 }
 
 // newExchange trusts two entries for one issuer: key "a" for audience
@@ -94,13 +98,22 @@ func ciClaims(repo string) map[string]any {
 	}
 }
 
+// post sends the exchange inside a request span, as the listener does, and
+// keeps that span's attributes in f.span.
 func (f *exchangeFixture) post(path, auth string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(http.MethodPost, path, nil)
+	sr := tracetest.NewSpanRecorder()
+	ctx, span := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)).Tracer("test").Start(context.Background(), "POST")
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, path, nil)
 	if auth != "" {
 		r.Header.Set("Authorization", auth)
 	}
 	w := httptest.NewRecorder()
 	f.mux.ServeHTTP(w, r)
+	span.End()
+	f.span = map[string]string{}
+	for _, kv := range sr.Ended()[0].Attributes() {
+		f.span[string(kv.Key)] = kv.Value.AsString()
+	}
 	return w
 }
 
@@ -136,6 +149,14 @@ func TestExchangeIssuesReadToken(t *testing.T) {
 	}
 	if strings.Contains(logs, tok) {
 		t.Error("token logged")
+	}
+	for k, v := range map[string]string{
+		telemetry.AttrIdentity: "workload:r1", telemetry.AttrIdentityType: "workload", telemetry.AttrIssuer: testIssuer,
+		telemetry.AttrTokenID: c.ID, telemetry.AttrRepo: "acme/assets", telemetry.AttrRepoID: "r1", telemetry.AttrOperation: "download",
+	} {
+		if f.span[k] != v {
+			t.Errorf("span %s = %q, want %q", k, f.span[k], v)
+		}
 	}
 	if got := f.counters(t)["lfs.tokens.issued{operation=download,repo=r1,user=workload:r1}"]; got != 1 {
 		t.Errorf("tokens issued = %d", got)
@@ -181,6 +202,9 @@ func TestExchangeRefusals(t *testing.T) {
 			}
 			if !strings.Contains(f.logs.String(), `"reason":"`+tt.reason+`"`) {
 				t.Errorf("log lacks reason %s: %s", tt.reason, f.logs.String())
+			}
+			if f.span[telemetry.AttrReason] != tt.reason {
+				t.Errorf("span reason = %q, want %s", f.span[telemetry.AttrReason], tt.reason)
 			}
 		})
 	}

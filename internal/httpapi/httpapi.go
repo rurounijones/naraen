@@ -13,6 +13,11 @@ import (
 	"math/big"
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 // Readier reports whether the datastore can serve decisions.
@@ -34,7 +39,10 @@ const WebhookPattern = "POST /webhooks/github"
 // nil. All are built by the caller, so this package needs no storage, token,
 // OIDC or provider code; a provider's handler arrives as a plain
 // http.Handler.
-func Handler(r Readier, batch, exchange, webhook http.Handler) http.Handler {
+//
+// Every request except the health probes gets a span from tp, named by its
+// route, which the handlers annotate with what they decided.
+func Handler(r Readier, batch, exchange, webhook http.Handler, tp trace.TracerProvider) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(BatchPattern, batch)
 	mux.Handle(ExchangePattern, exchange)
@@ -51,7 +59,26 @@ func Handler(r Readier, batch, exchange, webhook http.Handler) http.Handler {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	return secureHeaders(mux)
+	traced := otelhttp.NewHandler(mux, "https", append(telemetry.HTTPOptions(tp), otelhttp.WithFilter(notProbe))...)
+	return secureHeaders(withoutForwardedFor(traced))
+}
+
+// notProbe leaves the health probes untraced: a load balancer or the Auto
+// Scaling group polls them every few seconds, and their spans would bury the
+// requests worth reading.
+func notProbe(r *http.Request) bool {
+	return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+}
+
+// withoutForwardedFor drops X-Forwarded-For before the span is made. The
+// listener faces clients directly, with no proxy to set the header, so any
+// value came from the client; otelhttp would otherwise record it as the
+// span's client.address in place of the real peer.
+func withoutForwardedFor(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		req.Header.Del("X-Forwarded-For")
+		next.ServeHTTP(w, req)
+	})
 }
 
 func secureHeaders(next http.Handler) http.Handler {

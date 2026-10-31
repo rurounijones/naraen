@@ -20,7 +20,7 @@ The first release has not been cut yet, so everything so far is listed as added.
 - Fail-closed authorization from an in-memory snapshot, with every Batch request rechecked against it. Requests are refused until there is a snapshot and once the snapshot is older than its maximum age.
 - Validation before each snapshot swap, which rejects a sync that changes identities or grants by an unusually large amount.
 - An audit record for every SSH sign-in, refusal and token issued.
-- Optional OTLP export (`NARAEN_OTLP_ENDPOINT`) of metrics and logs.
+- Optional OTLP export (`NARAEN_OTLP_ENDPOINT`) of metrics, logs and traces covering every request, SSH command, provider sync and outbound call.
 - SSH connection limits per source and in total, including a rate limit configurable with `NARAEN_SSH_CONN_BURST` and `NARAEN_SSH_CONN_INTERVAL`.
 - A local stack from `docker compose up`, with S3-compatible storage, a development OIDC issuer and a client container. Its public development keys and secrets are refused outside development mode.
 - Static Linux binaries and a container image for amd64 and arm64, both signed with cosign, with SBOMs and GitHub build provenance. Releases are made only from `main` after every gate passes.

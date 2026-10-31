@@ -15,8 +15,11 @@ import (
 	"testing/iotest"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
@@ -302,6 +305,83 @@ func TestStorageFailures(t *testing.T) {
 	}
 	if got := f.counters(t)["lfs.links.issued{operation=upload,outcome=error,repo=r1,user=writer}"]; got != 2 {
 		t.Errorf("error outcomes = %d", got)
+	}
+}
+
+// doTraced is do inside a request span, as otelhttp makes on the listener,
+// and returns the spans ended by the time the request has been answered,
+// the request's last.
+func (f *fixture) doTraced(path, auth, reqBody string) (*httptest.ResponseRecorder, []sdktrace.ReadOnlySpan) {
+	sr := tracetest.NewSpanRecorder()
+	ctx, span := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)).Tracer("test").Start(context.Background(), "POST")
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, path, strings.NewReader(reqBody))
+	r.Header.Set("Authorization", auth)
+	w := httptest.NewRecorder()
+	f.mux.ServeHTTP(w, r)
+	span.End()
+	return w, sr.Ended()
+}
+
+// attrs returns a span's attributes as strings, numbers written in decimal.
+func attrs(s sdktrace.ReadOnlySpan) map[string]string {
+	m := map[string]string{}
+	for _, kv := range s.Attributes() {
+		m[string(kv.Key)] = kv.Value.String()
+	}
+	return m
+}
+
+// The request's span names who asked for what and what they got; each object
+// has a span of its own under it, with its outcome, failed only when storage
+// failed.
+func TestSpans(t *testing.T) {
+	f := newFixture(t)
+	f.objects.fail[oidOf('d')] = true
+	tok := f.mint(t, "writer", "r1", lfs.Upload)
+	claims, err := f.tokens.Verify(tok, "r1", lfs.Upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, spans := f.doTraced("/acme/assets/objects/batch", "Bearer "+tok,
+		batchBody(lfs.Upload, Object{oidOf('a'), 10}, Object{oidOf('c'), 30}, Object{oidOf('d'), 40}))
+	decode(t, w)
+	if len(spans) != 4 {
+		t.Fatalf("spans = %d, want one per object and the request's", len(spans))
+	}
+	req := spans[3]
+	got := attrs(req)
+	for k, v := range map[string]string{
+		telemetry.AttrIdentity: "writer", telemetry.AttrIdentityType: "person", telemetry.AttrTokenID: claims.ID,
+		telemetry.AttrRepo: "acme/assets", telemetry.AttrRepoID: "r1", telemetry.AttrOperation: "upload",
+		telemetry.AttrObjects: "3", telemetry.AttrLinks: "1", telemetry.AttrBytes: "30",
+	} {
+		if got[k] != v {
+			t.Errorf("request span %s = %q, want %q", k, got[k], v)
+		}
+	}
+	if len(got[telemetry.AttrRequestID]) != 2*requestIDBytes || !f.objects.requestIDs[got[telemetry.AttrRequestID]] {
+		t.Errorf("request span's request ID %q is not the links' %v", got[telemetry.AttrRequestID], f.objects.requestIDs)
+	}
+	outcomes := map[oid.OID]string{oidOf('a'): telemetry.OutcomePresent, oidOf('c'): telemetry.OutcomeIssued, oidOf('d'): telemetry.OutcomeError}
+	for _, s := range spans[:3] {
+		a := attrs(s)
+		id := oid.OID(a[telemetry.AttrOID])
+		want, ok := outcomes[id]
+		delete(outcomes, id)
+		failed := want == telemetry.OutcomeError
+		if !ok || s.Name() != "batch object" || s.Parent().SpanID() != req.SpanContext().SpanID() || a[telemetry.AttrOutcome] != want ||
+			(s.Status().Code == codes.Error) != failed || (len(s.Events()) == 1) != failed {
+			t.Errorf("object span %q %v: status %v, events %v", s.Name(), a, s.Status(), s.Events())
+		}
+	}
+	if a := attrs(spans[0]); a[telemetry.AttrSize] == "" {
+		t.Errorf("object span lacks its size: %v", a)
+	}
+
+	// A refusal puts its reason on the request's span.
+	w, spans = f.doTraced("/acme/assets/objects/batch", "Bearer nope", batchBody(lfs.Upload, Object{oidOf('a'), 10}))
+	if w.Code != http.StatusUnauthorized || len(spans) != 1 || attrs(spans[0])[telemetry.AttrReason] != "bad_token" {
+		t.Errorf("refusal: status %d, spans %v", w.Code, spans)
 	}
 }
 

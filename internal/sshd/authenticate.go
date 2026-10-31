@@ -6,6 +6,8 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/telemetry"
 	"github.com/rurounijones/naraen/internal/token"
@@ -65,6 +67,7 @@ func (a *Authenticator) Handle(ctx context.Context, s Session, cmd Command) ([]b
 	// the token itself and the href are never logged.
 	s.Log.InfoContext(ctx, "token issued", "token_id", claims.ID, "repo", cmd.Repo, "repo_id", repoID,
 		"operation", string(cmd.Op), "expires", time.Unix(claims.Expires, 0).UTC())
+	telemetry.Annotate(ctx, attribute.String(telemetry.AttrTokenID, claims.ID), attribute.String(telemetry.AttrRepoID, repoID))
 	a.rec.TokenIssued(ctx, string(cmd.Op), repoID, s.IdentityID)
 	return append(out, '\n'), nil
 }

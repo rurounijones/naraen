@@ -11,8 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/telemetry"
@@ -27,13 +32,19 @@ type scripted struct {
 	results []func() (*datastore.Snapshot, error)
 	then    func() (*datastore.Snapshot, error)
 	cancel  context.CancelFunc
+	// untraced counts syncs whose context held no span, under which the
+	// provider's requests would start traces of their own.
+	untraced int
 }
 
 func (s *scripted) Name() string { return "scripted" }
 
-func (s *scripted) FullSync(context.Context) (*datastore.Snapshot, error) {
+func (s *scripted) FullSync(ctx context.Context) (*datastore.Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		s.untraced++
+	}
 	if len(s.results) == 0 {
 		return s.then()
 	}
@@ -61,7 +72,8 @@ func snapshot(t *testing.T, people int) *datastore.Snapshot {
 
 // The first sync makes the store ready; a failed sync, one failed by the
 // source's rate limit, and one the store rejects leave it serving the last
-// good snapshot, each counted under its own reason.
+// good snapshot, each counted under its own reason. Each sync is a trace of its
+// own, marked failed with that reason, and the provider runs inside it.
 func TestRun(t *testing.T) {
 	store := datastore.NewStore(time.Hour, datastore.DefaultLimits)
 	good := snapshot(t, 1)
@@ -76,9 +88,11 @@ func TestRun(t *testing.T) {
 	}}
 	var logs bytes.Buffer
 	reader := sdkmetric.NewManualReader()
+	spans := tracetest.NewSpanRecorder()
 	done := make(chan struct{})
 	go func() {
-		Run(ctx, p, store, time.Millisecond, telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))), slog.New(slog.NewTextHandler(&logs, nil)))
+		Run(ctx, p, store, time.Millisecond, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)),
+			telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))), slog.New(slog.NewTextHandler(&logs, nil)))
 		close(done)
 	}()
 	select {
@@ -111,5 +125,24 @@ func TestRun(t *testing.T) {
 	applied, failed, rejected := strings.Index(out, "full sync applied"), strings.Index(out, "full sync failed"), strings.Index(out, "full sync rejected")
 	if applied < 0 || failed < applied || rejected < failed || !strings.Contains(out, "provider=scripted") {
 		t.Errorf("want applied, failed, rejected in that order:\n%s", out)
+	}
+	ended := spans.Ended()
+	if len(ended) < 4 || p.untraced != 0 {
+		t.Fatalf("%d spans, %d syncs outside one", len(ended), p.untraced)
+	}
+	for i, want := range []string{"", "failed", "rate_limited", "rejected"} {
+		s := ended[i]
+		attrs := attribute.NewSet(s.Attributes()...)
+		reason, _ := attrs.Value(telemetry.AttrReason)
+		failed := want != ""
+		events := 0
+		if failed {
+			events = 1 // the recorded error
+		}
+		if s.Name() != "provider full sync" || s.Parent().IsValid() || reason.AsString() != want ||
+			(s.Status().Code == codes.Error) != failed || len(s.Events()) != events {
+			t.Errorf("sync %d: span %q parent %v reason %q status %v events %d",
+				i, s.Name(), s.Parent(), reason.AsString(), s.Status(), len(s.Events()))
+		}
 	}
 }

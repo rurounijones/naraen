@@ -15,6 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/smithy-go/middleware"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/rurounijones/naraen/internal/oid"
 )
@@ -33,9 +37,48 @@ func testConfig() aws.Config {
 }
 
 func newStore(endpoint string) *Store {
-	s := New(testConfig(), endpoint, "acme-lfs")
+	return newTracedStore(endpoint, tracenoop.NewTracerProvider())
+}
+
+func newTracedStore(endpoint string, tp trace.TracerProvider) *Store {
+	s := New(testConfig(), endpoint, "acme-lfs", tp)
 	s.now = func() time.Time { return fixedNow }
 	return s
+}
+
+// A HEAD request is traced as a child of the caller's span; pre-signing,
+// which sends nothing, is not traced at all.
+func TestTracing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "42")
+	}))
+	defer srv.Close()
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	s := newTracedStore(srv.URL, tp)
+	ctx, parent := tp.Tracer("test").Start(context.Background(), "batch object")
+	if _, err := s.PresignGet(ctx, "1", testOID, "r"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PresignPut(ctx, "1", testOID, 1, "r"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(sr.Ended()); n != 0 {
+		t.Fatalf("pre-signing made %d spans", n)
+	}
+	if _, _, err := s.Stat(ctx, "1", testOID); err != nil {
+		t.Fatal(err)
+	}
+	parent.End()
+	var head sdktrace.ReadOnlySpan
+	for _, sp := range sr.Ended() {
+		if sp.Name() == "S3.HeadObject" {
+			head = sp
+		}
+	}
+	if head == nil || head.Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatalf("no S3.HeadObject span under the caller's: %v", sr.Ended())
+	}
 }
 
 // signedHeaders returns the X-Amz-SignedHeaders list of a pre-signed URL.

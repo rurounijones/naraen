@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -144,7 +145,7 @@ func start(t *testing.T) *fixture {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = sshd.Serve(ctx, ln, cfg, sshd.DefaultLimits, reportIdentity, telemetry.NewRecorder(noop.NewMeterProvider()), slog.New(slog.DiscardHandler))
+		_ = sshd.Serve(ctx, ln, cfg, sshd.DefaultLimits, reportIdentity, tracenoop.NewTracerProvider(), telemetry.NewRecorder(noop.NewMeterProvider()), slog.New(slog.DiscardHandler))
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 	return f

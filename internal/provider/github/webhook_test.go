@@ -2,6 +2,7 @@ package github
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -14,9 +15,13 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/datastore"
+	"github.com/rurounijones/naraen/internal/telemetry"
 )
 
 func deployKey(t testing.TB) (authorized, fingerprint string) {
@@ -89,18 +94,34 @@ func TestWebhookHandler(t *testing.T) {
 	store := &recorder{}
 	var logs bytes.Buffer
 	h := &WebhookHandler{Secret: secret, Store: store, Log: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	spans := tracetest.NewSpanRecorder()
+	tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)).Tracer("test")
+	// post delivers inside a request span, as the listener does, and leaves
+	// that span's attributes in lastSpan.
+	var lastSpan attribute.Set
 	post := func(event string, body []byte, sig string) int {
-		r := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
+		ctx, span := tracer.Start(context.Background(), "POST /webhooks/github")
+		r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/webhooks/github", bytes.NewReader(body))
 		r.Header.Set("X-GitHub-Event", event)
 		r.Header.Set("X-GitHub-Delivery", "d-1")
 		r.Header.Set("X-Hub-Signature-256", sig)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
+		span.End()
+		ended := spans.Ended()
+		lastSpan = attribute.NewSet(ended[len(ended)-1].Attributes()...)
 		return w.Code
+	}
+	spanAttr := func(k string) string {
+		v, _ := lastSpan.Value(attribute.Key(k))
+		return v.AsString()
 	}
 	removal := []byte(`{"action":"member_removed","membership":{"user":{"id":42,"login":"alice"}}}`)
 	if code := post("organization", removal, sign(secret, removal)); code != http.StatusAccepted {
 		t.Fatalf("signed removal: %d", code)
+	}
+	if spanAttr(telemetry.AttrEvent) != "organization" || spanAttr(telemetry.AttrDelivery) != "d-1" || lastSpan.HasValue(telemetry.AttrReason) {
+		t.Errorf("span = %v", lastSpan.ToSlice())
 	}
 	if len(store.got) != 1 || store.got[0].DeactivateIdentities[0] != "gh-user-42" {
 		t.Fatalf("narrowed = %+v", store.got)
@@ -126,17 +147,18 @@ func TestWebhookHandler(t *testing.T) {
 		t.Fatalf("narrowed = %+v", store.got)
 	}
 	for name, tt := range map[string]struct {
-		body []byte
-		sig  string
-		want int
+		body   []byte
+		sig    string
+		want   int
+		reason string
 	}{
-		"unsigned":       {removal, "", http.StatusUnauthorized},
-		"wrong secret":   {removal, sign([]byte("other"), removal), http.StatusUnauthorized},
-		"malformed":      {[]byte(`{`), sign(secret, []byte(`{`)), http.StatusBadRequest},
-		"oversized body": {bytes.Repeat([]byte(" "), maxDelivery+1), "", http.StatusRequestEntityTooLarge},
+		"unsigned":       {removal, "", http.StatusUnauthorized, "bad_signature"},
+		"wrong secret":   {removal, sign([]byte("other"), removal), http.StatusUnauthorized, "bad_signature"},
+		"malformed":      {[]byte(`{`), sign(secret, []byte(`{`)), http.StatusBadRequest, "malformed"},
+		"oversized body": {bytes.Repeat([]byte(" "), maxDelivery+1), "", http.StatusRequestEntityTooLarge, "too_large"},
 	} {
-		if code := post("organization", tt.body, tt.sig); code != tt.want {
-			t.Errorf("%s: %d, want %d", name, code, tt.want)
+		if code := post("organization", tt.body, tt.sig); code != tt.want || spanAttr(telemetry.AttrReason) != tt.reason {
+			t.Errorf("%s: %d with span reason %q, want %d and %q", name, code, spanAttr(telemetry.AttrReason), tt.want, tt.reason)
 		}
 	}
 	if len(store.got) != 3 {

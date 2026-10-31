@@ -130,4 +130,28 @@ func TestGitHubProviderEndToEnd(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), keyRefused) {
 		t.Fatalf("after org removal: %v", err)
 	}
+
+	// The sync is a trace holding each request it made to GitHub, the
+	// installation token's included, and each webhook delivery is a request
+	// span naming its event.
+	e.stop()
+	spans := e.otlp.spans()
+	syncs := find(spans, "provider full sync", map[string]string{"lfs.provider": "github"})
+	if len(syncs) == 0 || syncs[0].failed {
+		t.Fatalf("no successful sync span (spans: %v)", spans)
+	}
+	requests := map[string]int{}
+	for _, s := range spans {
+		if s.parent == syncs[0].id && s.trace == syncs[0].trace {
+			requests[s.name]++
+		}
+	}
+	if requests["HTTP POST"] != 1 || requests["HTTP GET"] < 7 {
+		t.Errorf("requests inside the sync = %v, want the token's POST and at least the 7 listings", requests)
+	}
+	for _, event := range []string{"member", "organization"} {
+		if len(find(spans, "POST /webhooks/github", map[string]string{"lfs.event": event, "http.response.status_code": "202"})) != 1 {
+			t.Errorf("no span for the %s delivery", event)
+		}
+	}
 }

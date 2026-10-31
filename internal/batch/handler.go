@@ -10,6 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/lfs"
@@ -117,6 +120,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	log = log.With("identity", claims.Subject, "identity_type", kind, "token_id", claims.ID,
 		"repo", repo.Path, "repo_id", repo.ID, "operation", string(req.Operation))
+	telemetry.Annotate(ctx,
+		attribute.String(telemetry.AttrIdentity, claims.Subject),
+		attribute.String(telemetry.AttrIdentityType, kind),
+		attribute.String(telemetry.AttrTokenID, claims.ID),
+		attribute.String(telemetry.AttrRepo, repo.Path),
+		attribute.String(telemetry.AttrRepoID, repo.ID),
+		attribute.String(telemetry.AttrOperation, string(req.Operation)))
 	if err := h.Authz.Recheck(claims.Subject, repo.ID, req.Operation); err != nil {
 		h.refuse(ctx, w, log, http.StatusForbidden, string(authz.ReasonOf(err)), kind)
 		return
@@ -128,6 +138,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID := hex.EncodeToString(raw)
+	telemetry.Annotate(ctx, attribute.String(telemetry.AttrRequestID, requestID))
 	objects, outcomes := h.actions(ctx, repo.ID, requestID, req)
 
 	var links int
@@ -141,6 +152,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.Rec.BytesRequested(ctx, string(req.Operation), repo.ID, claims.Subject, bytes)
+	telemetry.Annotate(ctx, attribute.Int(telemetry.AttrObjects, len(req.Objects)),
+		attribute.Int(telemetry.AttrLinks, links), attribute.Int64(telemetry.AttrBytes, bytes))
 	// The request ID is in every link's x-lfs-req, so S3's access log entries
 	// lead back to this record, and through the token ID to the sign-in.
 	log.InfoContext(ctx, "links issued", "request_id", requestID, "objects", len(req.Objects),
@@ -181,49 +194,66 @@ func (h *Handler) actions(ctx context.Context, repoID, requestID string, req Req
 	return objects, outcomes
 }
 
-// object answers for one object. Uploads of stored objects get no action, so
-// an existing object is never overwritten; downloads of objects that are not
-// stored, or are stored at another size, get an error instead of a link.
+// object answers for one object in a span of its own, which holds the
+// object's storage request and records its outcome.
 func (h *Handler) object(ctx context.Context, repoID, requestID string, op lfs.Operation, o Object) (objectResponse, string) {
+	ctx, span := telemetry.Start(ctx, "batch object",
+		attribute.String(telemetry.AttrOID, string(o.OID)), attribute.Int64(telemetry.AttrSize, o.Size))
+	defer span.End()
+	resp, outcome, err := h.answer(ctx, repoID, requestID, op, o)
+	span.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "storage failed")
+	}
+	return resp, outcome
+}
+
+// answer builds one object's answer. Uploads of stored objects get no action,
+// so an existing object is never overwritten; downloads of objects that are
+// not stored, or are stored at another size, get an error instead of a link.
+// The error is the storage failure behind OutcomeError.
+func (h *Handler) answer(ctx context.Context, repoID, requestID string, op lfs.Operation, o Object) (objectResponse, string, error) {
 	resp := objectResponse{OID: o.OID, Size: o.Size}
 	size, found, err := h.Objects.Stat(ctx, repoID, o.OID)
 	if err != nil {
 		h.Log.ErrorContext(ctx, "storage failed", "request_id", requestID, "oid", string(o.OID), "error", err)
 		resp.Error = &objectError{Code: http.StatusInternalServerError, Message: "storage unavailable"}
-		return resp, telemetry.OutcomeError
+		return resp, telemetry.OutcomeError, err
 	}
 	// An if chain rather than a tagless switch: mutation testing cannot see
 	// a switch's case conditions, and these are the access decisions.
 	var link storage.Link
 	if op == lfs.Upload {
 		if found {
-			return resp, telemetry.OutcomePresent
+			return resp, telemetry.OutcomePresent, nil
 		}
 		link, err = h.Objects.PresignPut(ctx, repoID, o.OID, o.Size, requestID)
 	} else {
 		if !found {
 			resp.Error = &objectError{Code: http.StatusNotFound, Message: "object not found"}
-			return resp, telemetry.OutcomeMissing
+			return resp, telemetry.OutcomeMissing, nil
 		}
 		if size != o.Size {
 			resp.Error = &objectError{Code: http.StatusUnprocessableEntity, Message: "size does not match the stored object"}
-			return resp, telemetry.OutcomeMismatch
+			return resp, telemetry.OutcomeMismatch, nil
 		}
 		link, err = h.Objects.PresignGet(ctx, repoID, o.OID, requestID)
 	}
 	if err != nil {
 		h.Log.ErrorContext(ctx, "presign failed", "request_id", requestID, "oid", string(o.OID), "error", err)
 		resp.Error = &objectError{Code: http.StatusInternalServerError, Message: "storage unavailable"}
-		return resp, telemetry.OutcomeError
+		return resp, telemetry.OutcomeError, err
 	}
 	resp.Authenticated = true
 	resp.Actions = map[string]action{string(op): {Href: link.URL, Header: link.Headers, ExpiresAt: link.Expires.UTC()}}
-	return resp, telemetry.OutcomeIssued
+	return resp, telemetry.OutcomeIssued, nil
 }
 
 // refuse logs and counts a refusal, and tells the client only the status.
 func (h *Handler) refuse(ctx context.Context, w http.ResponseWriter, log *slog.Logger, status int, reason, kind string) {
 	log.InfoContext(ctx, "batch refused", "status", status, "reason", reason)
+	telemetry.Annotate(ctx, attribute.String(telemetry.AttrReason, reason))
 	h.Rec.AuthFailure(ctx, reason, kind)
 	msg := "unauthorized"
 	if status == http.StatusForbidden {

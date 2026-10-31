@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/lfs"
@@ -74,6 +76,10 @@ func (x *Exchange) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	subject := WorkloadPrefix + repoID
 	log = log.With("identity", subject, "identity_type", string(datastore.KindWorkload), "issuer", issuer)
+	telemetry.Annotate(ctx,
+		attribute.String(telemetry.AttrIdentity, subject),
+		attribute.String(telemetry.AttrIdentityType, string(datastore.KindWorkload)),
+		attribute.String(telemetry.AttrIssuer, issuer))
 	rawPath := r.PathValue("owner") + "/" + r.PathValue("repo")
 	urlRepo, err := x.Authz.Authorize(subject, rawPath, lfs.Download)
 	if err != nil {
@@ -94,6 +100,11 @@ func (x *Exchange) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path, _ := pathnorm.Normalize(rawPath)
 	log.InfoContext(ctx, "token issued", "token_id", claims.ID, "repo", path, "repo_id", repoID,
 		"operation", string(lfs.Download), "expires", time.Unix(claims.Expires, 0).UTC())
+	telemetry.Annotate(ctx,
+		attribute.String(telemetry.AttrTokenID, claims.ID),
+		attribute.String(telemetry.AttrRepo, path),
+		attribute.String(telemetry.AttrRepoID, repoID),
+		attribute.String(telemetry.AttrOperation, string(lfs.Download)))
 	x.Rec.TokenIssued(ctx, string(lfs.Download), repoID, subject)
 	writeJSON(w, http.StatusOK, exchangeResponse{
 		Href:      x.Base + "/" + path,
@@ -127,6 +138,7 @@ func (x *Exchange) verify(snap *datastore.Snapshot, raw string) (repoID, issuer 
 
 func (x *Exchange) refuse(ctx context.Context, w http.ResponseWriter, log *slog.Logger, status int, reason string) {
 	log.InfoContext(ctx, "token exchange refused", "status", status, "reason", reason)
+	telemetry.Annotate(ctx, attribute.String(telemetry.AttrReason, reason))
 	x.Rec.AuthFailure(ctx, reason, string(datastore.KindWorkload))
 	msg := "unauthorized"
 	if status == http.StatusForbidden {

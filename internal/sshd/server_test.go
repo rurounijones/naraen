@@ -11,7 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/rurounijones/naraen/internal/authz"
@@ -71,19 +77,23 @@ func startWith(t *testing.T, known ssh.Signer, h Handler, lim Limits) (addr stri
 	return o.addr, o.hostPub
 }
 
-// observed is a running server whose log records and metrics a test can read.
+// observed is a running server whose log records, metrics and spans a test
+// can read.
 type observed struct {
 	addr    string
 	hostPub ssh.PublicKey
 	logs    *syncBuffer
 	metrics *sdkmetric.ManualReader
+	spans   *tracetest.SpanRecorder
+	traces  *sdktrace.TracerProvider
 }
 
 func startObserved(t *testing.T, known ssh.Signer, h Handler, lim Limits) *observed {
 	t.Helper()
 	host := newSigner(t)
 	cfg := NewServerConfig(host, authz.New(storeKnowing(t, known)))
-	o := &observed{hostPub: host.PublicKey(), logs: &syncBuffer{}, metrics: sdkmetric.NewManualReader()}
+	o := &observed{hostPub: host.PublicKey(), logs: &syncBuffer{}, metrics: sdkmetric.NewManualReader(), spans: tracetest.NewSpanRecorder()}
+	o.traces = sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(o.spans))
 	log := slog.New(slog.NewJSONHandler(o.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	rec := telemetry.NewRecorder(sdkmetric.NewMeterProvider(sdkmetric.WithReader(o.metrics)))
 
@@ -93,7 +103,7 @@ func startObserved(t *testing.T, known ssh.Signer, h Handler, lim Limits) *obser
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, cfg, lim, h, rec, log) }()
+	go func() { done <- Serve(ctx, ln, cfg, lim, h, o.traces, rec, log) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -164,6 +174,23 @@ func TestServeKnownKeyRunsCommand(t *testing.T) {
 	if remote, _ := r["remote"].(string); !strings.HasPrefix(remote, "127.0.0.1:") {
 		t.Errorf("remote = %v", r["remote"])
 	}
+
+	// The connection is a trace of its own, holding the command's span, and
+	// the records logged in it carry its IDs.
+	exec := o.span(t, "ssh exec", map[string]string{
+		telemetry.AttrCommand: CmdAuthenticate, telemetry.AttrRepo: "acme/assets", telemetry.AttrOperation: "download",
+	})
+	c.Close()
+	conn := o.span(t, "ssh connection", map[string]string{
+		telemetry.AttrIdentity: "alice", telemetry.AttrIdentityType: "person",
+		telemetry.AttrFingerprint: ssh.FingerprintSHA256(alice.PublicKey()), "network.peer.address": "127.0.0.1",
+	})
+	if conn.Parent().IsValid() || conn.SpanKind() != trace.SpanKindServer || exec.Parent().SpanID() != conn.SpanContext().SpanID() {
+		t.Errorf("connection %v (kind %v) does not hold exec %v", conn.SpanContext(), conn.SpanKind(), exec.Parent())
+	}
+	if exec.Status().Code != codes.Unset {
+		t.Errorf("exec status = %v", exec.Status())
+	}
 }
 
 func TestServeRefusals(t *testing.T) {
@@ -190,6 +217,9 @@ func TestServeRefusals(t *testing.T) {
 		t.Error("raw command logged")
 	}
 	waitCount(t, o.metrics, telemetry.MetricAuthFailures, "identity_type=person,reason=bad_command", 1)
+	if s := o.span(t, "ssh exec", map[string]string{telemetry.AttrReason: "bad_command"}); len(s.Attributes()) != 1 {
+		t.Errorf("unparseable command's span holds %v", s.Attributes())
+	}
 	sess, err := c.NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -227,21 +257,22 @@ func TestServeReportsUnsupportedAndRefusedDifferently(t *testing.T) {
 		record string
 		fields map[string]string
 		metric string // auth.failures point that must reach 1, "" for none
+		reason string // the exec span's reason, "" for none
 	}{
 		{
 			ErrUnsupported, "error: git-lfs-transfer is not supported\n", "command unsupported",
 			map[string]string{"command": CmdTransfer, "repo": "acme/assets", "operation": "upload"},
-			"",
+			"", "unsupported",
 		},
 		{
 			denied, "error: request refused\n", "command refused",
 			map[string]string{"command": CmdTransfer, "repo": "acme/assets", "operation": "upload", "reason": "not_ready"},
-			"identity_type=person,reason=not_ready",
+			"identity_type=person,reason=not_ready", "not_ready",
 		},
 		{
 			errors.New("secret"), "error: request refused\n", "command failed",
 			map[string]string{"command": CmdTransfer, "error": "secret", "level": "ERROR"},
-			"",
+			"", "",
 		},
 	} {
 		o := startObserved(t, alice, &recordingHandler{err: tt.err}, DefaultLimits)
@@ -258,6 +289,12 @@ func TestServeReportsUnsupportedAndRefusedDifferently(t *testing.T) {
 		r := o.logs.record(t, tt.record)
 		checkFields(t, r, tt.fields)
 		checkFields(t, r, map[string]string{"identity": "alice"})
+		// Only an internal failure is an error on the span; a refusal is the
+		// server working.
+		s := o.span(t, "ssh exec", map[string]string{telemetry.AttrCommand: CmdTransfer, telemetry.AttrReason: tt.reason})
+		if failed := tt.reason == ""; (s.Status().Code == codes.Error) != failed || (len(s.Events()) == 1) != failed {
+			t.Errorf("%v: span status %v, events %v", tt.err, s.Status(), s.Events())
+		}
 		if tt.metric == "" {
 			if got := counts(t, o.metrics, telemetry.MetricAuthFailures); len(got) != 0 {
 				t.Errorf("%v: counted as an auth failure: %v", tt.err, got)
@@ -283,6 +320,9 @@ func TestServeRejectsUnknownKey(t *testing.T) {
 		t.Errorf("remote = %v", r["remote"])
 	}
 	waitCount(t, o.metrics, telemetry.MetricAuthFailures, "identity_type=unknown,reason=unknown_key", 1)
+	o.span(t, "ssh connection", map[string]string{
+		telemetry.AttrReason: "unknown_key", telemetry.AttrFingerprint: ssh.FingerprintSHA256(mallory.PublicKey()),
+	})
 }
 
 // A handshake that fails without any key being refused, here a password
@@ -305,6 +345,21 @@ func TestServeRejectsPasswordAuth(t *testing.T) {
 	}
 	if strings.Contains(o.logs.String(), "hunter2") {
 		t.Error("password logged")
+	}
+	o.span(t, "ssh connection", map[string]string{telemetry.AttrReason: "handshake_failed"})
+}
+
+// Only a TCP address is split into address and port.
+func TestPeerAttrs(t *testing.T) {
+	got := attribute.NewSet(peerAttrs(&net.TCPAddr{IP: net.IPv6loopback, Port: 22})...)
+	addr, _ := got.Value("network.peer.address")
+	port, _ := got.Value("network.peer.port")
+	if addr.AsString() != "::1" || port.AsInt64() != 22 || got.Len() != 2 {
+		t.Errorf("tcp: %v", got.ToSlice())
+	}
+	unix := attribute.NewSet(peerAttrs(&net.UnixAddr{Name: "/run/naraen.sock", Net: "unix"})...)
+	if addr, _ := unix.Value("network.peer.address"); addr.AsString() != "/run/naraen.sock" || unix.Len() != 1 {
+		t.Errorf("unix: %v", unix.ToSlice())
 	}
 }
 
@@ -549,7 +604,7 @@ func TestServeRetriesTransientAcceptErrors(t *testing.T) {
 	ln := &flakyListener{failures: 3, calls: make(chan struct{}, 10)}
 	lim := DefaultLimits
 	lim.AcceptBackoff = time.Millisecond
-	err := Serve(context.Background(), ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, noRec(), quiet())
+	err := Serve(context.Background(), ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, tracenoop.NewTracerProvider(), noRec(), quiet())
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("err = %v, want net.ErrClosed", err)
 	}
@@ -564,7 +619,9 @@ func TestServeStopsDuringBackoff(t *testing.T) {
 	lim.AcceptBackoff = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, noRec(), quiet()) }()
+	go func() {
+		done <- Serve(ctx, ln, &ssh.ServerConfig{}, lim, &recordingHandler{}, tracenoop.NewTracerProvider(), noRec(), quiet())
+	}()
 	<-ln.calls
 	cancel()
 	select {

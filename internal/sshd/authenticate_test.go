@@ -11,7 +11,10 @@ import (
 	"testing/iotest"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/rurounijones/naraen/internal/authz"
 	"github.com/rurounijones/naraen/internal/datastore"
@@ -81,6 +84,8 @@ func TestAuthenticateIssuesScopedToken(t *testing.T) {
 	signer := testSigner(t)
 	logs := &syncBuffer{}
 	rec, metrics := observedRec()
+	recorded := tracetest.NewSpanRecorder()
+	spans := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorded))
 	a := NewAuthenticator(authz.New(grantStore(t)), signer, testBase, rec)
 	for i, tt := range []struct {
 		id, repo, href string
@@ -91,7 +96,9 @@ func TestAuthenticateIssuesScopedToken(t *testing.T) {
 		{"reader", "acme/assets", testBase + "/acme/assets", lfs.Download},
 		{"writer", "acme/old-assets", testBase + "/acme/old-assets", lfs.Upload},
 	} {
-		out, err := a.Handle(context.Background(), session(tt.id, logs), Command{Name: CmdAuthenticate, Repo: tt.repo, Op: tt.op})
+		ctx, span := spans.Tracer("test").Start(context.Background(), "ssh exec")
+		out, err := a.Handle(ctx, session(tt.id, logs), Command{Name: CmdAuthenticate, Repo: tt.repo, Op: tt.op})
+		span.End()
 		if err != nil {
 			t.Fatalf("%s %s %s: %v", tt.id, tt.repo, tt.op, err)
 		}
@@ -135,6 +142,13 @@ func TestAuthenticateIssuesScopedToken(t *testing.T) {
 			"operation": string(tt.op),
 			"expires":   time.Unix(c.Expires, 0).UTC().Format(time.RFC3339),
 		})
+		// The command's span names the token too, and the repo it is for.
+		attrs := attribute.NewSet(recorded.Ended()[i].Attributes()...)
+		tokenID, _ := attrs.Value(telemetry.AttrTokenID)
+		repoID, _ := attrs.Value(telemetry.AttrRepoID)
+		if tokenID.AsString() != c.ID || repoID.AsString() != "r1" {
+			t.Errorf("span attributes = %v", attrs.ToSlice())
+		}
 	}
 	got := counts(t, metrics, telemetry.MetricTokensIssued)
 	want := map[string]int64{

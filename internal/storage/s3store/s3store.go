@@ -15,7 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
+	"github.com/aws/smithy-go/tracing"
+	"github.com/aws/smithy-go/tracing/smithyoteltracing"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/rurounijones/naraen/internal/oid"
 	"github.com/rurounijones/naraen/internal/storage"
@@ -39,9 +42,12 @@ var _ storage.Presigner = (*Store)(nil)
 
 // New returns a Store on bucket using cfg's region and credentials. A non-empty
 // endpoint replaces the AWS endpoint and switches to path-style addressing,
-// which S3-compatible services such as SeaweedFS need.
-func New(cfg aws.Config, endpoint, bucket string) *Store {
+// which S3-compatible services such as SeaweedFS need. Requests to S3 are
+// traced from tp, as children of the caller's span; pre-signing sends no
+// request and makes no span.
+func New(cfg aws.Config, endpoint, bucket string, tp trace.TracerProvider) *Store {
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.TracerProvider = smithyoteltracing.Adapt(tp)
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 			o.UsePathStyle = true
@@ -56,9 +62,18 @@ func New(cfg aws.Config, endpoint, bucket string) *Store {
 	return &Store{
 		bucket:  bucket,
 		client:  client,
-		presign: s3.NewPresignClient(client, s3.WithPresignExpires(storage.LinkTTL)),
+		presign: s3.NewPresignClient(client, s3.WithPresignExpires(storage.LinkTTL), untraced),
 		now:     time.Now,
 	}
+}
+
+// untraced keeps pre-signing out of traces: the SDK would record it as an S3
+// GetObject or PutObject call, which the server never makes. The Batch
+// handler's span for the object already covers it.
+func untraced(o *s3.PresignOptions) {
+	o.ClientOptions = append(o.ClientOptions, func(so *s3.Options) {
+		so.TracerProvider = &tracing.NopTracerProvider{}
+	})
 }
 
 // PresignGet returns a download link for id.

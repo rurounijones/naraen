@@ -2,7 +2,7 @@
 
 # Base images are pinned by digest. Dependabot (docker ecosystem) keeps them current.
 ARG GO_IMAGE=golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
-ARG RUNTIME_IMAGE=gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+ARG RUNTIME_IMAGE=gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 
 # ---------------------------------------------------------------------------
 # dev: everything needed to build, test and scan, used by the devcontainer.

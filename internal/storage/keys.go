@@ -18,6 +18,11 @@ func ObjectKey(repoID string, id oid.OID) string {
 	return repoID + "/" + s[0:2] + "/" + s[2:4] + "/" + s
 }
 
+// SnapshotKey is where the bucket holds the saved datastore snapshot. It covers
+// every repo, so it sits at the bucket's root, not in a repo's folder. It has no
+// slash, so no ObjectKey can ever equal it, and no client can get a link to it.
+const SnapshotKey = "access-permissions-snapshot.json"
+
 // Link is a pre-signed URL and the headers the client must send with it.
 type Link struct {
 	URL     string

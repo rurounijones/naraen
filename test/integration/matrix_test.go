@@ -73,6 +73,7 @@ type env struct {
 	logs       *syncBuffer
 	otlp       *otlpReceiver
 	stop       func() // stops the server with SIGTERM and waits for it
+	restart    func() // stops the server and starts it again on the same address and bucket
 	sshPort    int
 	publicURL  string
 	knownHosts string
@@ -425,52 +426,62 @@ func startServerWith(t *testing.T, hook func(e *env, vars []string) []string) *e
 	if hook != nil {
 		srv.Env = hook(e, srv.Env)
 	}
-	logs := &syncBuffer{}
-	e.logs = logs
-	srv.Stdout, srv.Stderr = logs, logs
-	if err := srv.Start(); err != nil {
-		t.Fatal(err)
-	}
-	var once sync.Once
-	e.stop = func() {
-		// SIGTERM, as an orchestrator stops it, so the server flushes its
-		// metrics; a clean exit is part of what is tested.
-		once.Do(func() {
-			if err := srv.Process.Signal(syscall.SIGTERM); err != nil {
-				t.Errorf("stop server: %v", err)
-			}
-			done := make(chan error, 1)
-			go func() { done <- srv.Wait() }()
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Errorf("server did not stop cleanly: %v", err)
+	vars := srv.Env
+	start := func() {
+		srv := exec.Command(bin)
+		srv.Env = vars
+		logs := &syncBuffer{}
+		e.logs = logs
+		srv.Stdout, srv.Stderr = logs, logs
+		if err := srv.Start(); err != nil {
+			t.Fatal(err)
+		}
+		var once sync.Once
+		e.stop = func() {
+			// SIGTERM, as an orchestrator stops it, so the server flushes its
+			// metrics; a clean exit is part of what is tested.
+			once.Do(func() {
+				if err := srv.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Errorf("stop server: %v", err)
 				}
-			case <-time.After(20 * time.Second):
-				_ = srv.Process.Kill()
-				t.Errorf("server did not stop within 20s")
+				done := make(chan error, 1)
+				go func() { done <- srv.Wait() }()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Errorf("server did not stop cleanly: %v", err)
+					}
+				case <-time.After(20 * time.Second):
+					_ = srv.Process.Kill()
+					t.Errorf("server did not stop within 20s")
+				}
+			})
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", e.sshPort), time.Second)
+			if err == nil {
+				_ = c.Close()
+				return
 			}
-		})
+			if time.Now().After(deadline) {
+				t.Fatalf("server never listened: %v\n%s", err, logs.String())
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	e.restart = func() {
+		e.stop()
+		start()
 	}
 	t.Cleanup(func() {
 		e.stop()
 		if t.Failed() {
-			t.Logf("server log:\n%s", logs.String())
+			t.Logf("server log:\n%s", e.logs.String())
 		}
 	})
-
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", e.sshPort), time.Second)
-		if err == nil {
-			_ = c.Close()
-			return e
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("server never listened: %v\n%s", err, logs.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	start()
+	return e
 }
 
 // ssh runs command on the server as the named identity, from the source

@@ -33,6 +33,7 @@ import (
 	"github.com/rurounijones/naraen/internal/datastore"
 	"github.com/rurounijones/naraen/internal/httpapi"
 	"github.com/rurounijones/naraen/internal/oidc"
+	"github.com/rurounijones/naraen/internal/persist"
 	"github.com/rurounijones/naraen/internal/provider"
 	"github.com/rurounijones/naraen/internal/provider/github"
 	"github.com/rurounijones/naraen/internal/sshd"
@@ -101,15 +102,6 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 			log.WarnContext(ctx, "datastore loaded from a snapshot file: no provider keeps it in step with GitHub", "file", cfg.SnapshotFile)
 		}
 	}
-	// With neither a snapshot file nor a provider the server stays not-ready
-	// and refuses everything.
-	if cfg.GitHub != nil {
-		p, err := githubProvider(*cfg.GitHub, tel.Tracer, rec, log)
-		if err != nil {
-			return err
-		}
-		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, tel.Tracer, rec, log)
-	}
 
 	if cfg.Dev {
 		log.WarnContext(ctx, "development mode: key material that is not configured (SSH host key, TLS certificate, signing key) is ephemeral")
@@ -128,8 +120,9 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 	}
 	authorizer := authz.New(store)
 	batchHandler := batch.Unconfigured()
+	var objects *s3store.Store
 	if cfg.Bucket != "" {
-		objects, err := loadStorage(ctx, cfg.S3Endpoint, cfg.Bucket, tel.Tracer)
+		objects, err = loadStorage(ctx, cfg.S3Endpoint, cfg.Bucket, tel.Tracer)
 		if err != nil {
 			return err
 		}
@@ -139,6 +132,21 @@ func run(ctx context.Context, getenv config.Getenv, random io.Reader, log *slog.
 		}
 	} else {
 		log.WarnContext(ctx, "development mode: no bucket configured (NARAEN_S3_BUCKET), so the Batch API answers 503")
+	}
+	// With neither a snapshot file nor a provider the server stays not-ready
+	// and refuses everything.
+	if cfg.GitHub != nil {
+		p, err := githubProvider(*cfg.GitHub, tel.Tracer, rec, log)
+		if err != nil {
+			return err
+		}
+		// A copy needs a bucket to live in and a lasting key to sign it. A
+		// snapshot file needs no copy, being one already.
+		if objects != nil && len(cfg.TokenKeys) > 0 {
+			persist.Restore(ctx, store, objects, cfg.TokenKeys, log)
+			go persist.Run(ctx, store, objects, cfg.TokenKeys, tel.Tracer, rec, log)
+		}
+		go provider.Run(ctx, p, store, cfg.GitHub.SyncInterval, tel.Tracer, rec, log)
 	}
 	exchange := &oidc.Exchange{
 		Store: store, Authz: authorizer, Tokens: tokens, Base: cfg.PublicURL,

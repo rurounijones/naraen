@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -244,6 +245,22 @@ func validFingerprint(fp string) bool {
 	}
 	raw, err := base64.RawStdEncoding.Strict().DecodeString(b64)
 	return err == nil && len(raw) == 32
+}
+
+// Data returns the snapshot's content, in no particular order. NewSnapshot
+// accepts it and builds an equal snapshot.
+func (s *Snapshot) Data() Data {
+	d := Data{
+		Meta:       s.meta,
+		Identities: slices.Collect(maps.Values(s.identities)),
+		Keys:       slices.Collect(maps.Values(s.keys)),
+		Repos:      slices.Collect(maps.Values(s.repos)),
+		Trusts:     s.Trusts(),
+	}
+	for k, l := range s.grants {
+		d.Grants = append(d.Grants, Grant{IdentityID: k.identityID, RepoID: k.repoID, Level: l})
+	}
+	return d
 }
 
 // Meta returns the snapshot's metadata.

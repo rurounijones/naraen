@@ -3,11 +3,13 @@
 package s3store
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -29,11 +31,16 @@ import (
 // but records them in its server access logs.
 const RequestIDParam = "x-lfs-req"
 
+// maxReadObject bounds what ReadObject holds in memory.
+const maxReadObject = 64 << 20
+
 // Store pre-signs object URLs and inspects one bucket.
 type Store struct {
 	bucket  string
 	client  *s3.Client
 	presign *s3.PresignClient
+	// maxRead bounds ReadObject; it is replaceable in tests.
+	maxRead int64
 	// now is replaceable in tests.
 	now func() time.Time
 }
@@ -63,6 +70,7 @@ func New(cfg aws.Config, endpoint, bucket string, tp trace.TracerProvider) *Stor
 		bucket:  bucket,
 		client:  client,
 		presign: s3.NewPresignClient(client, s3.WithPresignExpires(storage.LinkTTL), untraced),
+		maxRead: maxReadObject,
 		now:     time.Now,
 	}
 }
@@ -121,6 +129,38 @@ func (s *Store) Stat(ctx context.Context, repoID string, id oid.OID) (int64, boo
 		return 0, false, fmt.Errorf("s3store: head: %w", err)
 	}
 	return aws.ToInt64(out.ContentLength), true, nil
+}
+
+// ReadObject returns the whole object at key, or found false if there is none.
+func (s *Store) ReadObject(ctx context.Context, key string) ([]byte, bool, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	var missing *types.NoSuchKey
+	if errors.As(err, &missing) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("s3store: get: %w", err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(out.Body, s.maxRead+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("s3store: get: %w", err)
+	}
+	if int64(len(body)) > s.maxRead {
+		return nil, false, fmt.Errorf("s3store: get: %s is larger than %d bytes", key, s.maxRead)
+	}
+	return body, true, nil
+}
+
+// WriteObject replaces the object at key with body.
+func (s *Store) WriteObject(ctx context.Context, key string, body []byte) error {
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(key), Body: bytes.NewReader(body),
+	})
+	if err != nil {
+		return fmt.Errorf("s3store: put: %w", err)
+	}
+	return nil
 }
 
 // clientHeaders returns the signed headers the client must send itself. Host

@@ -657,6 +657,33 @@ func TestRunStorageError(t *testing.T) {
 	}
 }
 
+// The provider's server restores and saves a copy of the datastore only when
+// it has a bucket and a lasting key to sign with.
+func TestRunSnapshotPersistence(t *testing.T) {
+	github := func(e map[string]string) map[string]string {
+		e["NARAEN_GITHUB_ORG"] = "acme"
+		e["NARAEN_GITHUB_APP_ID"] = "1"
+		e["NARAEN_GITHUB_INSTALLATION_ID"] = "2"
+		e["NARAEN_GITHUB_APP_KEY_FILE"] = write(t, "app.pem", appKeyPEM(t))
+		e["NARAEN_GITHUB_API_URL"] = "http://127.0.0.1:1"
+		return e
+	}
+	if logs := serveUntilCancelled(t, github(prodEnv(t)), rand.Reader); !strings.Contains(logs, "saved datastore snapshot could not be read") {
+		t.Errorf("bucket and key: no attempt to restore: %s", logs)
+	}
+	isolateAWS(t)
+	noBucket := github(devEnv())
+	if logs := serveUntilCancelled(t, noBucket, rand.Reader); strings.Contains(logs, "datastore snapshot") {
+		t.Errorf("no bucket: %s", logs)
+	}
+	noKey := github(devEnv())
+	noKey["NARAEN_S3_BUCKET"] = "acme-lfs"
+	noKey["NARAEN_S3_ENDPOINT"] = "http://127.0.0.1:1"
+	if logs := serveUntilCancelled(t, noKey, rand.Reader); strings.Contains(logs, "datastore snapshot") {
+		t.Errorf("ephemeral key: %s", logs)
+	}
+}
+
 func appKeyPEM(t *testing.T) []byte {
 	t.Helper()
 	k, err := rsa.GenerateKey(rand.Reader, 2048)

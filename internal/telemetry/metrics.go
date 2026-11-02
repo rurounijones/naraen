@@ -24,6 +24,8 @@ const (
 	MetricDatastoreAge      = "lfs.datastore.age"
 	MetricSyncFailures      = "lfs.sync.failures"
 	MetricSyncRateLimitWait = "lfs.sync.rate_limit_wait"
+
+	MetricSnapshotSaveFailures = "lfs.snapshot.save_failures"
 )
 
 // Label names allowed on metrics.
@@ -55,6 +57,7 @@ type Recorder struct {
 	objectSize    metric.Int64Histogram
 	syncFailures  metric.Int64Counter
 	syncWait      metric.Float64Counter
+	saveFailures  metric.Int64Counter
 }
 
 // NewRecorder creates the instruments on mp.
@@ -87,10 +90,13 @@ func NewRecorder(mp metric.MeterProvider) *Recorder {
 	syncWait, _ := m.Float64Counter(MetricSyncRateLimitWait,
 		metric.WithUnit("s"),
 		metric.WithDescription("Seconds the provider held its requests back for the source's rate limit"))
+	saveFailures, _ := m.Int64Counter(MetricSnapshotSaveFailures,
+		metric.WithUnit("{save}"),
+		metric.WithDescription("Saves of the datastore snapshot to the bucket that failed"))
 	return &Recorder{
 		authFailures: authFailures, tokensIssued: tokensIssued, connsRejected: connsRejected,
 		linksIssued: linksIssued, bytesReq: bytesReq, objectSize: objectSize, syncFailures: syncFailures,
-		syncWait: syncWait,
+		syncWait: syncWait, saveFailures: saveFailures,
 	}
 }
 
@@ -163,6 +169,11 @@ const (
 // reason is one of the Sync constants.
 func (r *Recorder) SyncFailure(ctx context.Context, reason string) {
 	r.syncFailures.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelReason, reason)))
+}
+
+// SnapshotSaveFailure counts one failed save of the datastore snapshot.
+func (r *Recorder) SnapshotSaveFailure(ctx context.Context) {
+	r.saveFailures.Add(ctx, 1)
 }
 
 // RateLimitWait counts d more of the provider's requests being held back for

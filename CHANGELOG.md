@@ -18,6 +18,7 @@ The first release has not been cut yet, so everything so far is listed as added.
 - A GitHub provider that syncs members, their SSH keys, collaborators, deploy keys and the Actions OIDC keys through a GitHub App, at startup and on a schedule (`NARAEN_SYNC_INTERVAL`), and waits out GitHub's rate limits.
 - Signed GitHub webhooks (`/webhooks/github`) that revoke access at once for removed members, removed collaborators and deleted deploy keys.
 - Fail-closed authorization from an in-memory snapshot, with every Batch request rechecked against it. Requests are refused until there is a snapshot and once the snapshot is older than its maximum age.
+- A signed copy of the snapshot at the bucket's root, restored at startup, so a replacement server keeps serving while GitHub is unreachable, up to the same maximum age.
 - Validation before each snapshot swap, which rejects a sync that changes identities or grants by an unusually large amount.
 - An audit record for every SSH sign-in, refusal and token issued.
 - Optional OTLP export (`NARAEN_OTLP_ENDPOINT`) of metrics, logs and traces covering every request, SSH command, provider sync and outbound call.

@@ -48,6 +48,10 @@ type SyncStart struct {
 type published struct {
 	snap  *Snapshot
 	start SyncStart
+	// restored marks a snapshot from a saved copy. It is no baseline for the
+	// change limits, so the first sync after boot is checked only for being
+	// non-empty, whether or not there was a copy to restore.
+	restored bool
 }
 
 type narrowing struct {
@@ -68,6 +72,8 @@ type Store struct {
 	pending  []narrowing // narrowings an in-flight sync may not have seen
 	approved bool        // the next swap may exceed the limits
 
+	changed chan struct{} // holds one signal once the live snapshot has changed
+
 	// Now is replaceable in tests.
 	Now func() time.Time
 }
@@ -75,7 +81,7 @@ type Store struct {
 // NewStore creates a Store that refuses to serve a snapshot whose sync began
 // more than maxAge ago, and rejects swaps that exceed limits.
 func NewStore(maxAge time.Duration, limits Limits) *Store {
-	return &Store{maxAge: maxAge, limits: limits, Now: time.Now}
+	return &Store{maxAge: maxAge, limits: limits, changed: make(chan struct{}, 1), Now: time.Now}
 }
 
 // Current returns the live snapshot, or an error if there is none or it is stale.
@@ -129,8 +135,8 @@ func (s *Store) Swap(start SyncStart, next *Snapshot) error {
 	if next == nil {
 		return fmt.Errorf("%w: nil snapshot", ErrSwapRejected)
 	}
-	if len(next.identities) == 0 || len(next.repos) == 0 {
-		return fmt.Errorf("%w: no identities or no repos", ErrSwapRejected)
+	if err := checkContents(next); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,13 +149,13 @@ func (s *Store) Swap(start SyncStart, next *Snapshot) error {
 			next = next.narrowed(p.n)
 		}
 	}
-	if old != nil && !s.approved {
+	if old != nil && !old.restored && !s.approved {
 		if err := s.limits.check(old.snap, next); err != nil {
 			return err
 		}
 	}
 	s.approved = false
-	s.cur.Store(&published{snap: next, start: start})
+	s.publish(&published{snap: next, start: start})
 	// Every later swap starts at or after start, so it has seen these.
 	s.pending = slices.DeleteFunc(s.pending, func(p narrowing) bool { return p.seq <= start.seq })
 	return nil
@@ -173,8 +179,71 @@ func (s *Store) Narrow(n Narrowing) {
 	s.seq++
 	s.pending = append(s.pending, narrowing{seq: s.seq, n: n})
 	if p := s.cur.Load(); p != nil {
-		s.cur.Store(&published{snap: p.snap.narrowed(n), start: p.start})
+		s.publish(&published{snap: p.snap.narrowed(n), start: p.start, restored: p.restored})
 	}
+}
+
+// Restore publishes a saved snapshot whose sync began at began, as if that
+// sync had just been swapped in, so it goes stale when the sync would have. It
+// is rejected if a snapshot is already live, if it is empty, if began is in
+// the future, or with ErrStale if it is past the maximum age. Narrowings
+// recorded so far are replayed onto it.
+func (s *Store) Restore(next *Snapshot, began time.Time) error {
+	if next == nil {
+		return fmt.Errorf("%w: nil snapshot", ErrSwapRejected)
+	}
+	if err := checkContents(next); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur.Load() != nil {
+		return fmt.Errorf("%w: a snapshot is already live", ErrSwapRejected)
+	}
+	age := s.Now().Sub(began)
+	if age < 0 {
+		return fmt.Errorf("%w: its sync began in the future", ErrSwapRejected)
+	}
+	if age > s.maxAge {
+		return ErrStale
+	}
+	for _, p := range s.pending {
+		next = next.narrowed(p.n)
+	}
+	// Sequence zero leaves these narrowings pending for any sync in flight.
+	// The copy already in the bucket is what was restored, so nothing signals.
+	s.cur.Store(&published{snap: next, start: SyncStart{at: began}, restored: true})
+	return nil
+}
+
+// Changed signals after the live snapshot changes. Signals coalesce: one
+// receive covers every change before it, so the receiver then reads Latest.
+func (s *Store) Changed() <-chan struct{} { return s.changed }
+
+// Latest returns the live snapshot and when its sync began, stale or not, or
+// false before the first swap. It is for keeping a copy; decisions use Current.
+func (s *Store) Latest() (*Snapshot, time.Time, bool) {
+	p := s.cur.Load()
+	if p == nil {
+		return nil, time.Time{}, false
+	}
+	return p.snap, p.start.at, true
+}
+
+// publish makes p live and signals Changed without waiting for a receiver.
+func (s *Store) publish(p *published) {
+	s.cur.Store(p)
+	select {
+	case s.changed <- struct{}{}:
+	default:
+	}
+}
+
+func checkContents(next *Snapshot) error {
+	if len(next.identities) == 0 || len(next.repos) == 0 {
+		return fmt.Errorf("%w: no identities or no repos", ErrSwapRejected)
+	}
+	return nil
 }
 
 // change counts how next differs from old.

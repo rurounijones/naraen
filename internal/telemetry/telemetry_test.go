@@ -95,6 +95,7 @@ func TestRecorder(t *testing.T) {
 	r.LinkOutcome(ctx, "download", "1", "alice", OutcomeMissing)
 	r.BytesRequested(ctx, "download", "1", "alice", 300)
 	r.SyncFailure(ctx, "rejected")
+	r.SnapshotSaveFailure(ctx)
 	r.RateLimitWait(ctx, 90*time.Second)
 	r.RateLimitWait(ctx, 1500*time.Millisecond)
 	r.RateLimitWait(ctx, 500*time.Millisecond)
@@ -111,9 +112,10 @@ func TestRecorder(t *testing.T) {
 			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "issued"):  2,
 			set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice", LabelOutcome, "missing"): 1,
 		},
-		MetricBytesRequested:    {set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice"): 300},
-		MetricSyncFailures:      {set(LabelReason, "rejected"): 1},
-		MetricSyncRateLimitWait: {set(): 92},
+		MetricBytesRequested:       {set(LabelOperation, "download", LabelRepo, "1", LabelUser, "alice"): 300},
+		MetricSyncFailures:         {set(LabelReason, "rejected"): 1},
+		MetricSyncRateLimitWait:    {set(): 92},
+		MetricSnapshotSaveFailures: {set(): 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("metrics = %v", got)

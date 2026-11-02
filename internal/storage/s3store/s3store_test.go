@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -192,5 +193,71 @@ func TestRequestIDStepRejectsOtherRequests(t *testing.T) {
 	_, _, err := requestIDStep("x").HandleBuild(context.Background(), middleware.BuildInput{Request: "not a request"}, nil)
 	if err == nil {
 		t.Fatal("accepted a non-HTTP request")
+	}
+}
+
+func TestReadObject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/acme-lfs/present":
+			_, _ = w.Write([]byte("body"))
+		case "/acme-lfs/missing":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<Error><Code>NoSuchKey</Code></Error>`))
+		case "/acme-lfs/truncated":
+			w.Header().Set("Content-Length", "10")
+			_, _ = w.Write([]byte("x"))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+	s := newStore(srv.URL)
+	if body, found, err := s.ReadObject(context.Background(), "present"); err != nil || !found || string(body) != "body" {
+		t.Errorf("present: %q, %v, %v", body, found, err)
+	}
+	if body, found, err := s.ReadObject(context.Background(), "missing"); err != nil || found || body != nil {
+		t.Errorf("missing: %q, %v, %v", body, found, err)
+	}
+	if _, found, err := s.ReadObject(context.Background(), "denied"); err == nil || found {
+		t.Errorf("denied: %v, %v", found, err)
+	}
+	if _, found, err := s.ReadObject(context.Background(), "truncated"); err == nil || found {
+		t.Errorf("truncated: %v, %v", found, err)
+	}
+	// Exactly the limit fits; a byte over does not.
+	s.maxRead = 4
+	if body, found, err := s.ReadObject(context.Background(), "present"); err != nil || !found || string(body) != "body" {
+		t.Errorf("at the limit: %q, %v, %v", body, found, err)
+	}
+	s.maxRead = 3
+	if _, found, err := s.ReadObject(context.Background(), "present"); err == nil || found {
+		t.Errorf("over the limit: %v, %v", found, err)
+	}
+	if New(testConfig(), srv.URL, "b", tracenoop.NewTracerProvider()).maxRead != maxReadObject {
+		t.Error("default limit not set")
+	}
+}
+
+func TestWriteObject(t *testing.T) {
+	var path, body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/acme-lfs/denied" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		path, body = r.Method+" "+r.URL.Path, string(raw)
+	}))
+	defer srv.Close()
+	s := newStore(srv.URL)
+	if err := s.WriteObject(context.Background(), "k", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if path != "PUT /acme-lfs/k" || !strings.Contains(body, "data") {
+		t.Errorf("sent %q %q", path, body)
+	}
+	if err := s.WriteObject(context.Background(), "denied", []byte("data")); err == nil {
+		t.Error("denied write reported as success")
 	}
 }

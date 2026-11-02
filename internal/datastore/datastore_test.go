@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -655,4 +656,148 @@ func TestAge(t *testing.T) {
 	if age, ok := st.Age(); !ok || age != 11*time.Minute {
 		t.Errorf("age = %v, %v; want 11m", age, ok)
 	}
+}
+
+func TestSnapshotDataRoundTrip(t *testing.T) {
+	s, err := NewSnapshot(sample(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := NewSnapshot(s.Data())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.identities, back.identities) || !reflect.DeepEqual(s.keys, back.keys) ||
+		!reflect.DeepEqual(s.repos, back.repos) || !reflect.DeepEqual(s.repoByPath, back.repoByPath) ||
+		!reflect.DeepEqual(s.grants, back.grants) || !reflect.DeepEqual(s.trusts, back.trusts) || s.meta != back.meta {
+		t.Errorf("round trip changed the snapshot: %+v != %+v", back, s)
+	}
+}
+
+func TestStoreRestore(t *testing.T) {
+	now := t0
+	st := newStore(time.Hour, &now)
+	if _, _, ok := st.Latest(); ok {
+		t.Fatal("Latest before any snapshot")
+	}
+	began := t0.Add(-30 * time.Minute)
+	if err := st.Restore(ten(t), began); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Ready() {
+		t.Fatal("not ready")
+	}
+	if snap, at, ok := st.Latest(); !ok || snap == nil || !at.Equal(began) {
+		t.Errorf("Latest = %v, %v, %v", snap, at, ok)
+	}
+	select {
+	case <-st.Changed():
+		t.Error("restoring signalled a change: the copy is already saved")
+	default:
+	}
+	// It goes stale when its sync would have, not an hour from the restart.
+	now = began.Add(time.Hour)
+	if !st.Ready() {
+		t.Error("stale at exactly the limit")
+	}
+	now = began.Add(time.Hour + time.Nanosecond)
+	if _, err := st.Current(); !errors.Is(err, ErrStale) {
+		t.Errorf("err = %v", err)
+	}
+	if err := st.Restore(ten(t), now); !errors.Is(err, ErrSwapRejected) {
+		t.Errorf("restored over a live snapshot: %v", err)
+	}
+}
+
+func TestStoreRestoreRefuses(t *testing.T) {
+	now := t0
+	for name, tc := range map[string]struct {
+		snap  *Snapshot
+		began time.Time
+		want  error
+	}{
+		"nil":    {nil, t0, ErrSwapRejected},
+		"empty":  {build(t, world{}), t0, ErrSwapRejected},
+		"future": {ten(t), t0.Add(time.Nanosecond), ErrSwapRejected},
+		"stale":  {ten(t), t0.Add(-time.Hour - time.Nanosecond), ErrStale},
+	} {
+		st := newStore(time.Hour, &now)
+		if err := st.Restore(tc.snap, tc.began); !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if st.Ready() {
+			t.Errorf("%s: became ready", name)
+		}
+	}
+	// A snapshot exactly at either bound is accepted.
+	for _, began := range []time.Time{t0, t0.Add(-time.Hour)} {
+		if err := newStore(time.Hour, &now).Restore(ten(t), began); err != nil {
+			t.Errorf("began %v: %v", began, err)
+		}
+	}
+}
+
+// A restored snapshot is no baseline: the first sync after boot is checked only
+// for being non-empty, with or without a copy to restore. Later syncs are held
+// to the limits, including after a narrowing of the restored snapshot.
+func TestStoreRestoredIsNoBaseline(t *testing.T) {
+	now := t0
+	other := build(t, world{identities: people("q", 10), grants: readers(people("q", 10))})
+	st := newStore(time.Hour, &now)
+	if err := st.Restore(ten(t), t0); err != nil {
+		t.Fatal(err)
+	}
+	st.Narrow(Narrowing{})
+	<-st.Changed()
+	if err := st.Swap(st.StartSync(), other); err != nil {
+		t.Fatalf("first sync after restoring: %v", err)
+	}
+	if err := st.Swap(st.StartSync(), ten(t)); !errors.Is(err, ErrSwapRejected) {
+		t.Fatalf("second sync escaped the limits: %v", err)
+	}
+}
+
+// Narrowings recorded before a restore apply to it, and stay pending for a sync
+// already in flight.
+func TestStoreRestoreReplaysNarrowings(t *testing.T) {
+	now := t0
+	st := newStore(time.Hour, &now)
+	start := st.StartSync()
+	id := ten(t).Data().Identities[0].ID
+	st.Narrow(Narrowing{DeactivateIdentities: []string{id}})
+	select {
+	case <-st.Changed():
+		t.Error("signalled with nothing live")
+	default:
+	}
+	if err := st.Restore(ten(t), t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := current(t, st).Identity(id); ok {
+		t.Error("narrowing lost on restore")
+	}
+	if err := st.Swap(start, ten(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := current(t, st).Identity(id); ok {
+		t.Error("narrowing lost on the sync after restore")
+	}
+}
+
+// Every published change signals, without blocking when nobody is listening.
+func TestStoreChangedCoalesces(t *testing.T) {
+	now := t0
+	st := newStore(time.Hour, &now)
+	if err := st.Swap(st.StartSync(), ten(t)); err != nil {
+		t.Fatal(err)
+	}
+	st.Narrow(Narrowing{})
+	<-st.Changed()
+	select {
+	case <-st.Changed():
+		t.Error("changes did not coalesce")
+	default:
+	}
+	st.Narrow(Narrowing{})
+	<-st.Changed()
 }

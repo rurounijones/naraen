@@ -1,0 +1,45 @@
+name: docs
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "Dockerfile", ".github/workflows/docs.yml"]
+  workflow_dispatch:
+# The deploy job gets only what it needs; the build job reads the repository.
+permissions: {contents: read}
+# One deployment at a time, and never cancel one that is publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      # The dev image carries the pinned Hugo and Dart Sass.
+      - name: Build dev image
+        run: docker build --target dev -t naraen-dev .
+      - name: Build the site
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen/docs -u 0 -e HOME=/tmp -e BASE_URL naraen-dev hugo --minify --gc --panicOnWarning --baseURL "$BASE_URL/"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with: {path: docs/public}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

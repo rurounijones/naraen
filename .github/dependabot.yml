@@ -12,7 +12,7 @@ updates:
     directory: /docs
     schedule: {interval: weekly}
   - package-ecosystem: github-actions
-    directory: /
+    directories: [/, /.github/actions/dev-image]
     schedule: {interval: weekly}
   - package-ecosystem: docker
     directory: /

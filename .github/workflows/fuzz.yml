@@ -12,6 +12,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false, fetch-depth: 0}
       - name: Build dev image
-        run: docker build --target dev -t naraen-dev .
+        uses: ./.github/actions/dev-image
       - name: Run
         run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task fuzz FUZZTIME=5m"

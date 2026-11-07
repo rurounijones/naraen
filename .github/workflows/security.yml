@@ -23,8 +23,12 @@ jobs:
         with: {persist-credentials: false, fetch-depth: 0}
       - name: Build dev image
         uses: ./.github/actions/dev-image
+      # The dev container has no Docker, so the runtime image is built here and
+      # mounted in as a tarball for ci-scan.
+      - name: Build runtime image
+        uses: ./.github/actions/runtime-image
       - name: Run
-        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task scan"
+        run: docker run --rm -v "$PWD:/workspaces/naraen" -v "$RUNNER_TEMP:/ci:ro" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task ci-scan"
   osv:
     runs-on: ubuntu-24.04
     steps:

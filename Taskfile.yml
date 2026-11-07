@@ -7,6 +7,7 @@ version: "3"
 vars:
   FUZZTIME: '{{.FUZZTIME | default "20s"}}'
   IMAGE: naraen:dev
+  IMAGE_TAR: '{{.IMAGE_TAR | default "/ci/naraen-image.tar"}}'
 
 tasks:
   default:
@@ -128,13 +129,26 @@ tasks:
     cmds:
       - docker build --target runtime -t {{.IMAGE}} .
 
+  scan-source:
+    desc: Trivy filesystem and config scans (HIGH/CRITICAL fail); needs no Docker
+    cmds:
+      - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore .
+      - trivy config --severity HIGH,CRITICAL --exit-code 1 .
+
   scan:
     desc: Trivy filesystem, config and image scans (HIGH/CRITICAL fail)
     deps: [image]
     cmds:
-      - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore .
-      - trivy config --severity HIGH,CRITICAL --exit-code 1 .
+      - task: scan-source
       - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore {{.IMAGE}}
+
+  # CI runs the tasks in a container that has no Docker. The workflow builds
+  # the runtime image on the host, saves it to IMAGE_TAR, and mounts it in.
+  ci-scan:
+    desc: CI form of scan, for a runtime image saved at IMAGE_TAR instead of built here
+    cmds:
+      - task: scan-source
+      - trivy image --input {{.IMAGE_TAR}} --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore
 
   dast:
     desc: ZAP, Nuclei, testssl.sh and ssh-audit against the compose-run server

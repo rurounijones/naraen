@@ -22,6 +22,8 @@ ARG SYFT_VERSION=v1.55.0
 ARG COSIGN_VERSION=v3.1.4
 ARG TRIVY_VERSION=0.76.1
 ARG HADOLINT_VERSION=v2.15.1
+ARG HUGO_VERSION=0.169.0
+ARG DART_SASS_VERSION=1.108.1
 ARG SEMGREP_VERSION=1.182.1
 ARG PRECOMMIT_VERSION=4.7.0
 ARG SSH_AUDIT_VERSION=3.9.0
@@ -65,7 +67,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /tmp
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
-    case "$arch" in amd64) trivy_arch=64bit; hl_arch=x86_64; hl_sha=c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507 ;; arm64) trivy_arch=ARM64; hl_arch=arm64; hl_sha=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d ;; esac; \
+    case "$arch" in amd64) trivy_arch=64bit; hl_arch=x86_64; hl_sha=c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507; hugo_sha=c41672a0725d307758a132bc94a962e59760eb33f9ba08c991b81f9881d6fa7d; sass_arch=x64; sass_sha=8c699c6e808ef44425b74e3f800e44b7cbec5d6d8bec022aba034294c4bfe4c0 ;; arm64) trivy_arch=ARM64; hl_arch=arm64; hl_sha=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d; hugo_sha=5b190e5d2836c09efe25cc6249f70bde8a6c5331ef412a4c9137e9d5de89a515; sass_arch=arm64; sass_sha=bc7696af4579c7286b00b7ba49363c90d98aebdfd4881d7a37fd2669c92b2efb ;; esac; \
     base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"; \
     curl -fsSLO "$base/trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
     curl -fsSLO "$base/trivy_${TRIVY_VERSION}_checksums.txt"; \
@@ -76,6 +78,17 @@ RUN set -eux; \
     curl -fsSLO "$base/hadolint-Linux-${hl_arch}"; \
     echo "${hl_sha}  hadolint-Linux-${hl_arch}" | sha256sum -c -; \
     install -m 0755 "hadolint-Linux-${hl_arch}" /usr/local/bin/hadolint; \
+    hugo_tar="hugo_extended_${HUGO_VERSION}_linux-${arch}.tar.gz"; \
+    curl -fsSLO "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/${hugo_tar}"; \
+    echo "${hugo_sha}  ${hugo_tar}" | sha256sum -c -; \
+    tar -xzf "${hugo_tar}" hugo; \
+    install -m 0755 hugo /usr/local/bin/hugo; \
+    sass_tar="dart-sass-${DART_SASS_VERSION}-linux-${sass_arch}.tar.gz"; \
+    curl -fsSLO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/${sass_tar}"; \
+    echo "${sass_sha}  ${sass_tar}" | sha256sum -c -; \
+    tar -xzf "${sass_tar}"; \
+    cp -r dart-sass /opt/dart-sass; \
+    ln -s /opt/dart-sass/sass /usr/local/bin/sass; \
     rm -rf /tmp/*
 WORKDIR /
 

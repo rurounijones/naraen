@@ -3,6 +3,7 @@
 Develop inside the devcontainer (or any container built from the `dev` stage of the `Dockerfile`); no host Go toolchain is needed.
 
 - `task check` is the fast gate: format, lint, nilaway, race tests, 100% line and branch coverage, vulnerability, SAST and secret scans.
+- `task docs` builds the documentation site in `docs/` (Hugo and Docsy, laid out by Diátaxis) and fails on any warning, including a broken link; `task docs-serve` serves it on port 1313. Document what the code does, not its history or plans, and update the page when a change alters behaviour it describes.
 - `task ci` adds fuzzing, mutation testing, integration tests, image scans and DAST.
 - All security gates are blocking. Do not add `//nolint` without an explanation.
 - Code on the request path (`authz`, `sshd`, `batch`, `token`, `httpapi`, `oidc`, `datastore`) must not import `internal/provider`; the linter enforces it. A provider's webhook handler is mounted on `httpapi` from `main` as a plain `http.Handler`.

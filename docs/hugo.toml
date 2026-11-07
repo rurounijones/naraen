@@ -1,0 +1,71 @@
+baseURL = "/"
+title = "naraen"
+disableKinds = ["taxonomy", "term"]
+enableRobotsTXT = true
+
+[params]
+  copyright = "naraen contributors"
+  github_repo = "https://github.com/rurounijones/naraen"
+  github_branch = "main"
+  [params.ui]
+    sidebar_menu_compact = true
+    breadcrumb_disable = false
+    navbar_logo = false
+    sidebar_search_disable = true
+  [params.ui.feedback]
+    enable = false
+  [params.ui.readingtime]
+    enable = false
+
+[menu]
+  [[menu.main]]
+    name = "Source"
+    weight = 50
+    url = "https://github.com/rurounijones/naraen"
+    pre = "<i class='fab fa-github'></i>"
+
+[markup]
+  [markup.goldmark.renderer]
+    # Docsy's landing-page blocks expand to HTML inside Markdown. All
+    # content is written and reviewed in this repository, never user-supplied.
+    unsafe = true
+  [markup.highlight]
+    style = "tango"
+    noClasses = false
+
+[module]
+  [module.hugoVersion]
+    extended = true
+
+  [[module.imports]]
+    path = "github.com/docsy/docsy/theme"
+
+  # Docsy's theme mounts Bootstrap and Font Awesome from node_modules.
+  # Mounting them from pinned Go modules instead keeps the toolchain free
+  # of Node.
+  [[module.imports]]
+    path = "github.com/twbs/bootstrap"
+    [[module.imports.mounts]]
+      source = "scss"
+      target = "assets/vendor/bootstrap/scss"
+    [[module.imports.mounts]]
+      source = "dist/js"
+      target = "assets/vendor/bootstrap/dist/js"
+
+  [[module.imports]]
+    path = "github.com/FortAwesome/Font-Awesome"
+    [[module.imports.mounts]]
+      source = "scss"
+      target = "assets/vendor/Font-Awesome/scss"
+    [[module.imports.mounts]]
+      source = "webfonts"
+      target = "static/webfonts"
+
+  # Go modules never contain a directory named vendor, so Bootstrap's
+  # scss/vendor/_rfs.scss is missing from the module. The file is
+  # byte-for-byte the twbs/rfs v10.0.0 entry point.
+  [[module.imports]]
+    path = "github.com/twbs/rfs"
+    [[module.imports.mounts]]
+      source = "scss.scss"
+      target = "assets/vendor/bootstrap/scss/vendor/_rfs.scss"

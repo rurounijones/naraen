@@ -7,6 +7,10 @@ updates:
   - package-ecosystem: gomod
     directory: /tools
     schedule: {interval: weekly}
+  # The documentation theme (Docsy and its Hugo modules).
+  - package-ecosystem: gomod
+    directory: /docs
+    schedule: {interval: weekly}
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: weekly}

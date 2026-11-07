@@ -113,6 +113,16 @@ tasks:
     desc: Run the server locally (dev only)
     cmds: [go run ./cmd/naraen]
 
+  docs:
+    desc: Build the documentation site into docs/public, failing on any warning
+    dir: docs
+    cmds: [hugo --minify --gc --panicOnWarning]
+
+  docs-serve:
+    desc: Serve the documentation site with live reload on port 1313
+    dir: docs
+    cmds: [hugo server --bind 0.0.0.0 --port 1313]
+
   image:
     desc: Build the hardened runtime image
     cmds:
@@ -141,6 +151,7 @@ tasks:
       - task: vuln
       - task: sec
       - task: secrets
+      - task: docs
       - task: release-check
 
   ci:

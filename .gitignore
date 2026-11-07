@@ -1,6 +1,9 @@
 /bin/
 /dist/
 /dast-reports/
+/docs/public/
+/docs/resources/
+/docs/.hugo_build.lock
 coverage.out
 coverage.html
 *.test

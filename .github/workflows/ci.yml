@@ -48,7 +48,8 @@ jobs:
         uses: ./.github/actions/dev-image
       - name: Restore Go caches
         uses: ./.github/actions/go-cache
-        with: {job: ${{ matrix.task }}}
+        with:
+          job: ${{ matrix.name }}
       - name: Run
         run: docker run --rm -v "$RUNNER_TEMP/go-cache:/gocache" -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task ${{ matrix.task }}"
 
@@ -65,6 +66,7 @@ jobs:
         uses: ./.github/actions/dev-image
       - name: Restore Go caches
         uses: ./.github/actions/go-cache
-        with: {job: test-arm64}
+        with:
+          job: test-arm64
       - name: Run
         run: docker run --rm -v "$RUNNER_TEMP/go-cache:/gocache" -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task cover-lines"

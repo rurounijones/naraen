@@ -152,7 +152,7 @@ services:
   # file), and makes sure the server is up first.
   zap-api:
     profiles: [dast]
-    image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
+    image: ghcr.io/zaproxy/zaproxy:stable@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af
     # Authenticated: dast.sh sets NARAEN_DAST_TOKEN to a writer token for
     # example/repo and NARAEN_DAST_OIDC_TOKEN to a dev OIDC token for it, and
     # .zap/auth_hook.py makes ZAP send each to the endpoint that takes it, so
@@ -167,7 +167,7 @@ services:
 
   zap-baseline:
     profiles: [dast]
-    image: ghcr.io/zaproxy/zaproxy:stable@sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
+    image: ghcr.io/zaproxy/zaproxy:stable@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af
     command: >
       zap-baseline.py -t https://naraen:8443 -c /zap/wrk/rules.tsv
       -r zap-baseline.html

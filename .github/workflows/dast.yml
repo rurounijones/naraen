@@ -1,4 +1,4 @@
-name: DAST
+name: Dynamic Security Scan
 on:
   pull_request:
   workflow_call:

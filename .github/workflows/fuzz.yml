@@ -1,4 +1,4 @@
-name: Fuzz
+name: Fuzz Tests
 on:
   pull_request:
   workflow_call:

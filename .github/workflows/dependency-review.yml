@@ -1,4 +1,4 @@
-name: Dependencies
+name: Dependency Review
 on: pull_request
 permissions: {contents: read}
 jobs:

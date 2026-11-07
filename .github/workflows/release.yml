@@ -18,23 +18,23 @@ jobs:
 
   # The same gates as `task ci`, run on the tagged commit.
   check:
-    name: Check
+    name: Code Quality
     uses: ./.github/workflows/ci.yml
   security:
-    name: Security
+    name: Security Checks
     uses: ./.github/workflows/security.yml
     permissions: {contents: read, security-events: write}
   integration:
-    name: Integration
+    name: Integration Tests
     uses: ./.github/workflows/integration.yml
   fuzz:
-    name: Fuzz
+    name: Fuzz Tests
     uses: ./.github/workflows/fuzz.yml
   mutation:
-    name: Mutation
+    name: Mutation Tests
     uses: ./.github/workflows/mutation.yml
   dast:
-    name: DAST
+    name: Dynamic Security Scan
     uses: ./.github/workflows/dast.yml
 
   release:

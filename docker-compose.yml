@@ -174,7 +174,7 @@ services:
 
   testssl:
     profiles: [dast]
-    image: drwetter/testssl.sh:latest@sha256:9fc0395106bf1df9a20695d04d6fda09c56301cd62a63cb24aedaa27f991a1e4
+    image: drwetter/testssl.sh:latest@sha256:e42cb1ba9445ea861e8b6eec96b97f6f293ce4e5908eebc75c28bdd96d66108e
     # Findings are written as JSON and judged by scripts/dast.sh, because
     # testssl.sh itself exits 0 whatever it finds.
     command: ["--severity", "LOW", "-p", "-E", "-U", "-h", "-S", "--quiet", "--color", "0", "--jsonfile", "/tmp/testssl.json", "naraen:8443"]

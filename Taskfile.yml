@@ -53,12 +53,22 @@ tasks:
     desc: Unit tests with the race detector
     cmds: [go test -race -shuffle=on ./...]
 
-  cover:
-    desc: Tests with line (100%) and branch (100%) coverage gates
+  cover-lines:
+    desc: Race tests with the line (100%) coverage gate
     cmds:
       - go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ./...
       - scripts/tool.sh go-test-coverage --config=.testcoverage.yml
-      - scripts/branchcov.sh
+
+  cover-branches:
+    desc: Branch (100%) coverage gate, per package, in parallel (BRANCHCOV_JOBS)
+    cmds: [scripts/branchcov.sh]
+
+  # CI runs cover-lines and cover-branches as separate jobs.
+  cover:
+    desc: Tests with line (100%) and branch (100%) coverage gates
+    cmds:
+      - task: cover-lines
+      - task: cover-branches
 
   mutation:
     desc: Mutation testing (config in .gremlins.yaml)

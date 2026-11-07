@@ -34,7 +34,8 @@ jobs:
           - {name: Format, task: fmt-check tidy-check}
           - {name: Lint, task: lint}
           - {name: Nilaway, task: nilaway}
-          - {name: Tests (amd64), task: cover}
+          - {name: Tests (amd64), task: cover-lines}
+          - {name: Branches (amd64), task: cover-branches}
           - {name: Vulns, task: vuln}
           - {name: SAST, task: sec}
           - {name: Secrets, task: secrets}
@@ -48,8 +49,8 @@ jobs:
       - name: Run
         run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task ${{ matrix.task }}"
 
-  # Production runs on arm64. Lint and scans read the same source on either
-  # architecture, so only the tests run here too.
+  # Production runs on arm64. Lint, scans and branch coverage read the same
+  # source on either architecture, so only the tests run here too.
   test-arm64:
     name: Tests (arm64)
     runs-on: ubuntu-24.04-arm
@@ -60,4 +61,4 @@ jobs:
       - name: Build dev image
         uses: ./.github/actions/dev-image
       - name: Run
-        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task cover"
+        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task cover-lines"

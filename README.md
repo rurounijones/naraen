@@ -90,7 +90,7 @@ Everything runs in a container; no host Go toolchain is required.
 | --- | --- |
 | `task check` | Fast gate: format, tidy, lint, nilaway, coverage, vuln, SAST, secrets |
 | `task ci` | `check` plus fuzz, mutation, integration, image scan and DAST |
-| `task test`, `task cover` | Unit tests, line and branch coverage gates |
+| `task test`, `task cover` | Unit tests, line and branch coverage gates (`task cover-lines`, `task cover-branches`) |
 | `task fuzz`, `task mutation` | Fuzzing (`FUZZTIME=5m`) and mutation testing |
 | `task integration` | The access matrix with real git, git-lfs and OpenSSH against the built server and a signature-checking local S3 (`docker compose run --rm s3-init`, or the running stack), plus upload-integrity checks of the signed links |
 | `task smoke` | The walkthrough below, against the running compose stack |

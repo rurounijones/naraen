@@ -1,4 +1,4 @@
-name: mutation
+name: Mutation
 on:
   pull_request:
   workflow_call:
@@ -6,6 +6,7 @@ on:
 permissions: {contents: read}
 jobs:
   mutation:
+    name: Gremlins
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

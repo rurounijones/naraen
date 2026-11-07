@@ -1,4 +1,4 @@
-name: integration
+name: Integration
 on:
   push: {branches: [main]}
   pull_request:
@@ -6,6 +6,7 @@ on:
 permissions: {contents: read}
 jobs:
   integration:
+    name: "Clients (${{ matrix.runner == 'ubuntu-24.04' && 'amd64' || 'arm64' }})"
     # Production runs on arm64, so the real clients test that build as well.
     strategy:
       fail-fast: false

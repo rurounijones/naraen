@@ -1,4 +1,4 @@
-name: ci
+name: Check
 on:
   push: {branches: [main]}
   pull_request:
@@ -8,20 +8,50 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  check:
+  # Builds the dev image once and fills the layer cache, so the jobs below
+  # restore it instead of all building the same image at the same time.
+  image:
+    name: Image (amd64)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - name: Build dev image
+        uses: ./.github/actions/dev-image
+
+  # The parts of `task check`, one job each so a failure names its cause and
+  # they run side by side. `task check` stays the single local gate.
+  gate:
+    name: ${{ matrix.name }}
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: Format, task: fmt-check tidy-check}
+          - {name: Lint, task: lint}
+          - {name: Nilaway, task: nilaway}
+          - {name: Tests (amd64), task: cover}
+          - {name: Vulns, task: vuln}
+          - {name: SAST, task: sec}
+          - {name: Secrets, task: secrets}
+          - {name: Docs, task: docs}
+          - {name: Release build, task: release-check}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false, fetch-depth: 0}
       - name: Build dev image
         uses: ./.github/actions/dev-image
       - name: Run
-        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task check"
+        run: docker run --rm -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task ${{ matrix.task }}"
 
   # Production runs on arm64. Lint and scans read the same source on either
   # architecture, so only the tests run here too.
   test-arm64:
+    name: Tests (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:

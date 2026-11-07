@@ -1,4 +1,4 @@
-name: release
+name: Release
 on:
   push: {tags: ["v*"]}
 permissions: {contents: read}
@@ -8,6 +8,7 @@ concurrency:
 jobs:
   # A tag can point at any commit; only reviewed commits on main are released.
   on-main:
+    name: Tag on main
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -17,20 +18,27 @@ jobs:
 
   # The same gates as `task ci`, run on the tagged commit.
   check:
+    name: Check
     uses: ./.github/workflows/ci.yml
   security:
+    name: Security
     uses: ./.github/workflows/security.yml
     permissions: {contents: read, security-events: write}
   integration:
+    name: Integration
     uses: ./.github/workflows/integration.yml
   fuzz:
+    name: Fuzz
     uses: ./.github/workflows/fuzz.yml
   mutation:
+    name: Mutation
     uses: ./.github/workflows/mutation.yml
   dast:
+    name: DAST
     uses: ./.github/workflows/dast.yml
 
   release:
+    name: Publish
     needs: [on-main, check, security, integration, fuzz, mutation, dast]
     runs-on: ubuntu-24.04
     timeout-minutes: 45

@@ -1,0 +1,19 @@
+name: Restore the Go caches
+description: >-
+  Restores the Go build and module caches that earlier runs of the same job
+  saved, in $RUNNER_TEMP/go-cache, which the job mounts into the dev container
+  at /gocache (GOCACHE=/gocache/build, GOMODCACHE=/gocache/mod). The caches are
+  kept per job and runner architecture. A run that changes go.sum starts from
+  the newest cache of the same job instead of from nothing, and saves its own.
+inputs:
+  job:
+    description: Short name of the job, so that jobs do not overwrite each other's cache.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/go-cache
+        key: go-${{ runner.arch }}-${{ inputs.job }}-${{ hashFiles('go.sum', 'tools/go.sum') }}
+        restore-keys: go-${{ runner.arch }}-${{ inputs.job }}-

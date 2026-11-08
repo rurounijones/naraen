@@ -128,10 +128,12 @@ jobs:
         with: {persist-credentials: false, fetch-depth: 0}
       - name: Build dev image
         uses: ./.github/actions/dev-image
+      # The checkout belongs to the runner, not root, so git in the container
+      # must be told to trust it, or it cannot find the base commit.
       - name: Run
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
-        run: docker run --rm -e BASE -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task fuzz FUZZTIME=5m"
+        run: docker run --rm -e BASE -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task fuzz FUZZTIME=5m"
 
   # Same rule as fuzzing: the lines changed, or everything on the schedule and
   # for a release.
@@ -146,7 +148,9 @@ jobs:
         with: {persist-credentials: false, fetch-depth: 0}
       - name: Build dev image
         uses: ./.github/actions/dev-image
+      # The checkout belongs to the runner, not root, so git in the container
+      # must be told to trust it, or it cannot find the base commit.
       - name: Run
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
-        run: docker run --rm -e BASE -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task mutation"
+        run: docker run --rm -e BASE -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task mutation"

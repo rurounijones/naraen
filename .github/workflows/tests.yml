@@ -1,0 +1,152 @@
+name: Tests
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_call:
+  schedule:
+    - cron: "41 2 * * *"   # fuzz everything, daily
+    - cron: "22 3 * * 0"   # mutate everything, weekly
+permissions: {contents: read}
+concurrency:
+  # The event is part of the group so that a push cannot cancel a scheduled run.
+  group: tests-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # Decides whether the code or anything that runs it changed, so a commit that
+  # touches only documentation or the like skips every job below. Anything but a
+  # push or a pull request (a schedule, a release) always runs them.
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Compare with the base
+        id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          # Go files, module files (the dependencies, in both modules), the
+          # toolchain image, and what drives the tests: tasks, scripts, tool
+          # settings, fixtures, corpora and this workflow.
+          pattern='(\.go$|(^|/)go\.(mod|sum|work)$|^Dockerfile$|^docker-compose\.yml$|^Taskfile\.yml$|^scripts/|^\.gremlins\.yaml$|^\.testcoverage\.yml$|^test/|/testdata/|^\.github/actions/|^\.github/workflows/tests\.yml$)'
+          # No base, or one this checkout lacks (a new branch or tag reports all
+          # zeros), cannot be compared: run.
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "No usable base, running the tests"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE" HEAD)
+          if printf '%s\n' "$changed" | grep -qE "$pattern"; then
+            echo "Code or test inputs changed since $BASE, running the tests"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing the tests depend on changed since $BASE, skipping them"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Production runs on arm64, so the tests run on both architectures.
+  unit:
+    name: Unit (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Build dev image
+        uses: ./.github/actions/dev-image
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
+        with:
+          job: unit-${{ matrix.arch }}
+      - name: Run
+        run: docker run --rm -v "$RUNNER_TEMP/go-cache:/gocache" -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task cover-lines"
+
+  # Branch coverage reads the same source on either architecture, so it runs once.
+  branches:
+    name: Branch coverage
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Build dev image
+        uses: ./.github/actions/dev-image
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
+        with:
+          job: branches
+      - name: Run
+        run: docker run --rm -v "$RUNNER_TEMP/go-cache:/gocache" -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task cover-branches"
+
+  integration:
+    name: Integration (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      # Starts S3 and gives it its identities and signature checks.
+      - run: docker compose run --rm s3-init
+      - name: Build dev image
+        uses: ./.github/actions/dev-image
+      - name: Run
+        run: docker run --rm --network host -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp naraen-dev task integration
+
+  # A push or pull request fuzzes what it changed. The schedule and a release
+  # (a new tag reports all zeros) fuzz everything.
+  fuzz:
+    name: Fuzz
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && (github.event_name != 'schedule' || github.event.schedule == '41 2 * * *')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Build dev image
+        uses: ./.github/actions/dev-image
+      - name: Run
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+        run: docker run --rm -e BASE -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task fuzz FUZZTIME=5m"
+
+  # Same rule as fuzzing: the lines changed, or everything on the schedule and
+  # for a release.
+  mutation:
+    name: Mutation
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && (github.event_name != 'schedule' || github.event.schedule == '22 3 * * 0')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false, fetch-depth: 0}
+      - name: Build dev image
+        uses: ./.github/actions/dev-image
+      - name: Run
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+        run: docker run --rm -e BASE -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "task mutation"

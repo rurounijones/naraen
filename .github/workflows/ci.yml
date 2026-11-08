@@ -34,8 +34,6 @@ jobs:
           - {name: Format, task: fmt-check tidy-check}
           - {name: Lint, task: lint}
           - {name: Nilaway, task: nilaway}
-          - {name: Tests (amd64), task: cover-lines}
-          - {name: Branches (amd64), task: cover-branches}
           - {name: Vulns, task: vuln}
           - {name: SAST, task: sec}
           - {name: Secrets, task: secrets}
@@ -52,21 +50,3 @@ jobs:
           job: ${{ matrix.name }}
       - name: Run
         run: docker run --rm -v "$RUNNER_TEMP/go-cache:/gocache" -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task ${{ matrix.task }}"
-
-  # Production runs on arm64. Lint, scans and branch coverage read the same
-  # source on either architecture, so only the tests run here too.
-  test-arm64:
-    name: Tests (arm64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: {persist-credentials: false, fetch-depth: 0}
-      - name: Build dev image
-        uses: ./.github/actions/dev-image
-      - name: Restore Go caches
-        uses: ./.github/actions/go-cache
-        with:
-          job: test-arm64
-      - name: Run
-        run: docker run --rm -v "$RUNNER_TEMP/go-cache:/gocache" -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod -v "$PWD:/workspaces/naraen" -w /workspaces/naraen -u 0 -e HOME=/tmp -e GOFLAGS=-buildvcs=false naraen-dev bash -c "git config --global --add safe.directory /workspaces/naraen && task cover-lines"

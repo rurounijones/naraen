@@ -24,22 +24,16 @@ jobs:
     name: Security Checks
     uses: ./.github/workflows/security.yml
     permissions: {contents: read, security-events: write}
-  integration:
-    name: Integration Tests
-    uses: ./.github/workflows/integration.yml
-  fuzz:
-    name: Fuzz Tests
-    uses: ./.github/workflows/fuzz.yml
-  mutation:
-    name: Mutation Tests
-    uses: ./.github/workflows/mutation.yml
+  tests:
+    name: Tests
+    uses: ./.github/workflows/tests.yml
   dast:
     name: Dynamic Security Scan
     uses: ./.github/workflows/dast.yml
 
   release:
     name: Publish
-    needs: [on-main, check, security, integration, fuzz, mutation, dast]
+    needs: [on-main, check, security, tests, dast]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions: {contents: write, packages: write, id-token: write, attestations: write}

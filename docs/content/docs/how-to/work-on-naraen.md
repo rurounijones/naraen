@@ -14,6 +14,8 @@ docker compose run --rm dev task check
 
 `task check` is the fast gate: format, lint, nil-safety analysis, race tests with 100% line and branch coverage, vulnerability, SAST and secret scans, and a release build. `task ci` adds fuzzing, mutation testing, integration tests, image scans and DAST. All security gates are blocking.
 
+To test only what you changed, pass a base commit: `task mutation -- origin/main` mutates only the lines changed since it, and `task fuzz -- origin/main` fuzzes only the packages that changed or import a changed package. CI does the same for a push or pull request and runs everything on its schedule and for a release.
+
 List every task with `task --list`.
 
 ## Build and preview these docs

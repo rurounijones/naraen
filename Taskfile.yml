@@ -71,13 +71,14 @@ tasks:
       - task: cover-branches
 
   mutation:
-    desc: Mutation testing (config in .gremlins.yaml)
-    cmds: [scripts/tool.sh gremlins unleash]
+    desc: 'Mutation testing (config in .gremlins.yaml); `task mutation -- <commit>` tests only the lines changed since it'
+    cmds:
+      - scripts/mutation.sh {{.CLI_ARGS}}
 
   fuzz:
-    desc: Run every fuzz target for FUZZTIME (default 20s)
+    desc: 'Run every fuzz target for FUZZTIME (default 20s); `task fuzz -- <commit>` fuzzes only the packages changed since it'
     cmds:
-      - FUZZTIME={{.FUZZTIME}} scripts/fuzz.sh
+      - FUZZTIME={{.FUZZTIME}} scripts/fuzz.sh {{.CLI_ARGS}}
 
   integration:
     desc: Access matrix with real clients against the built server, with a local S3

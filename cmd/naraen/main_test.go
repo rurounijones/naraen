@@ -234,7 +234,7 @@ func TestRunHTTPSListenError(t *testing.T) {
 
 // serveUntilCancelled starts run with e, waits until it listens, stops it and
 // returns its logs.
-func serveUntilCancelled(t *testing.T, e map[string]string, random io.Reader) string {
+func serveUntilCancelled(t *testing.T, e map[string]string, random io.Reader, also ...string) string {
 	t.Helper()
 	logs := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -243,9 +243,9 @@ func serveUntilCancelled(t *testing.T, e map[string]string, random io.Reader) st
 		done <- run(ctx, env(e), random, slog.New(slog.NewTextHandler(logs, nil)))
 	}()
 	deadline := time.Now().Add(10 * time.Second)
-	for !strings.Contains(logs.String(), "listening") {
+	for !logged(logs.String(), append([]string{"listening"}, also...)) {
 		if time.Now().After(deadline) {
-			t.Fatalf("server never started listening: %s", logs.String())
+			t.Fatalf("server never logged %q: %s", append([]string{"listening"}, also...), logs.String())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -259,6 +259,16 @@ func serveUntilCancelled(t *testing.T, e map[string]string, random io.Reader) st
 		t.Fatal("server did not shut down")
 	}
 	return logs.String()
+}
+
+// logged reports whether every phrase is in the logs.
+func logged(logs string, phrases []string) bool {
+	for _, p := range phrases {
+		if !strings.Contains(logs, p) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRunServesUntilCancelled(t *testing.T) {
@@ -745,7 +755,9 @@ func TestRunWithGitHubProvider(t *testing.T) {
 	e["NARAEN_GITHUB_INSTALLATION_ID"] = "2"
 	e["NARAEN_GITHUB_APP_KEY_FILE"] = write(t, "app.pem", appKeyPEM(t))
 	e["NARAEN_GITHUB_API_URL"] = "http://127.0.0.1:1"
-	logs := serveUntilCancelled(t, e, rand.Reader)
+	// The sync runs in the background, so cancelling at the first "listening"
+	// can stop it before it logs; wait for its failure.
+	logs := serveUntilCancelled(t, e, rand.Reader, "full sync failed")
 	if !strings.Contains(logs, "full sync failed") {
 		t.Errorf("sync failure not logged: %s", logs)
 	}
